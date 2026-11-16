@@ -16,6 +16,23 @@ def wrapped(value):
     return error
 
 
+def test_json_provenance_survives_the_activation_envelope(capsys):
+    from mindie_knowledge.releases_io import _json, _remote_json, ReleaseFetchError
+
+    for parse, expected in ((_remote_json, "temporary_network"), (_json, "internal")):
+        try:
+            parse(b'{"PRIVATE":')
+        except ReleaseFetchError as error:
+            diagnostics.emit_error(error)
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["error"]["category"] == expected
+        assert "PRIVATE" not in json.dumps(envelope)
+        rebuilt = diagnostics.child_error(wrapped(envelope))
+        assert rebuilt.code == "invalid_release_json"
+        assert rebuilt.category == expected
+        assert rebuilt.mindie_diagnostic["incident_id"] == envelope["diagnostic"]["incident_id"]
+
+
 def test_unknown_activation_exception_is_not_misclassified_as_catalog_connectivity():
     evidence = {"exception_chain": ["KeyError"], "message": "PRIVATE secret"}
     original = wrapped(dict(schema=diagnostics.SCHEMA, kind="exception",

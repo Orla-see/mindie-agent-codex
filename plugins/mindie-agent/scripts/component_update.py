@@ -2,8 +2,8 @@
 [Invariants] Adapter source and its baseline lock remain immutable. A component
 receipt binds the effective lock and installed commits. Plugin updates inherit
 the current component floor; bootstrap cannot switch it back to baseline pins.
-Expected catalog HTTP/transport/malformed-feed misses keep shared diagnostic
-codes; unclassified helper crashes stay internal.
+Expected catalog HTTP/transport misses and JSON rejected at the HTTP boundary
+keep shared diagnostic codes; local parsing and unclassified crashes stay internal.
 [Timeouts & Locks] External metadata shares 15s across interpreters. The builder
 owns 420s and its generation lock; validation takes 180s; idle handoff takes 30s.
 [Side-Effect Policy] Builds a private generation, validates without a model, and
@@ -38,6 +38,7 @@ _CODE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _HOST = frozenset({"FileNotFoundError", "CalledProcessError"})
 _HOST_CODES = frozenset({"invalid_harness_version", "invalid_installed_version"})
 _TIMEOUT = frozenset({"TimeoutExpired", "TimeoutError"})
+_CATALOG_CATEGORIES = frozenset({"temporary_network", "rate_limited", "certificate", "internal"})
 
 
 class CatalogError(RuntimeError):
@@ -53,6 +54,9 @@ def emit_catalog_error(exc) -> None:
     status = getattr(exc, "status", None)
     if type(status) is int and 100 <= status <= 599:
         payload["error"]["status"] = status
+    category = getattr(exc, "category", None)
+    if isinstance(category, str) and category in _CATALOG_CATEGORIES:
+        payload["error"]["category"] = category
     print(json.dumps(payload, sort_keys=True))
     raise SystemExit(1)
 
@@ -65,7 +69,7 @@ def _error_payload(raw):
     except (ValueError, TypeError):
         return None
     error = data.get("error") if isinstance(data, dict) else None
-    return error if isinstance(error, dict) else None
+    return data if isinstance(error, dict) else None
 
 
 def _copy_process(source, target):
@@ -141,6 +145,17 @@ def _catalog_error(code, *, category="temporary_network", status=None, retry_aft
     return _copy_process(source, error) if source is not None else error
 
 
+def _catalog_category(code, status, category=None):
+    if isinstance(category, str) and category in _CATALOG_CATEGORIES:
+        return category
+    if code == "release_certificate_error":
+        return "certificate"
+    if code in {"release_http_error", "release_transport_unavailable"}:
+        return "rate_limited" if status == 429 else "temporary_network"
+    # A reason code alone cannot prove whether JSON failed remotely or locally.
+    return "internal"
+
+
 def typed_catalog_error(exc):
     """Rebuild typed catalog facts lost at the child or HTTP boundary."""
     try:
@@ -150,11 +165,12 @@ def typed_catalog_error(exc):
         ReleaseResponseTooLarge = ()
         ReleaseFetchError = ()
 
-    payload = _error_payload(getattr(exc, "mindie_output", None))
-    if payload is None:
+    envelope = _error_payload(getattr(exc, "mindie_output", None))
+    if envelope is None:
         result = getattr(exc, "process_result", None)
-        payload = _error_payload(getattr(result, "stdout", None))
-    if payload is not None:
+        envelope = _error_payload(getattr(result, "stdout", None))
+    if envelope is not None:
+        payload = envelope["error"]
         kind = payload.get("type")
         code = payload.get("code")
         code = code if isinstance(code, str) and _CODE.fullmatch(code) else None
@@ -162,23 +178,23 @@ def typed_catalog_error(exc):
             error = FileNotFoundError("component helper is unavailable for catalog selection")
         elif kind in _TIMEOUT:
             error = TimeoutError("component catalog probe timed out")
-        else:
+        elif kind in {"CatalogError", "ReleaseFetchError", "ReleaseJSONError"}:
             status = payload.get("status")
-            category = (
-                "certificate" if code == "release_certificate_error"
-                else "rate_limited" if status == 429
-                else "temporary_network"
-            )
             error = _catalog_error(
                 code or "release catalog unavailable",
-                category=category,
+                category=_catalog_category(code, status, payload.get("category")),
                 status=status if type(status) is int else None,
             )
+        else:
+            from diagnostic_support import reference
+            if (diagnostic := reference(envelope)) is not None:
+                exc.mindie_diagnostic = diagnostic
+            return exc
         return _copy_process(exc, error)
     if isinstance(exc, ReleaseFetchError):
         return _catalog_error(
             exc.code,
-            category="rate_limited" if exc.status == 429 else "temporary_network",
+            category=_catalog_category(exc.code, exc.status, getattr(exc, "category", None)),
             status=exc.status,
             source=exc,
         )
@@ -191,8 +207,6 @@ def typed_catalog_error(exc):
             retry_after=kind[1] if kind else None,
             source=exc,
         )
-    if isinstance(exc, json.JSONDecodeError):
-        return _catalog_error("release_catalog_invalid", source=exc)
     if isinstance(exc, ReleaseResponseTooLarge):
         return _catalog_error("release_transport_unavailable", source=exc)
     if (kind := classify_transport_exception(exc)) is not None:

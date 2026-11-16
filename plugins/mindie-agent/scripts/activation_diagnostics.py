@@ -65,13 +65,16 @@ def emit_error(exception):
             error["code"] = code
     if catalog:
         # Existing typed catalog projection already admits only static codes.
-        from component_update import _CODE
+        from component_update import _CATALOG_CATEGORIES, _CODE
         code = getattr(typed, "code", None)
         if isinstance(code, str) and _CODE.fullmatch(code):
             error["code"] = code
         status = getattr(typed, "status", None)
         if type(status) is int and 100 <= status <= 599:
             error["status"] = status
+        category = getattr(typed, "category", None)
+        if category in _CATALOG_CATEGORIES:
+            error["category"] = category
     from diagnostic_support import build_metadata, failure
     original_evidence = evidence(exception)
     # Classification may rebuild the exception; record the original traceback

@@ -274,12 +274,13 @@ def test_entry_malformed_profile_fields_raise_profile_unavailable_and_separate_d
     assert "profile-binding" not in res.stderr
 
 
-def test_component_update_classifies_json_decode_error_as_catalog_error():
+def test_component_update_keeps_local_json_decode_error_reportable():
+    from mindie_diagnostics.fallback import update_failure_policy
+
     err = json.JSONDecodeError("Expecting value", "", 0)
     typed = component_update.typed_catalog_error(err)
-    assert isinstance(typed, component_update.CatalogError)
-    assert typed.code == "release_catalog_invalid"
-    assert typed.category == "temporary_network"
+    assert typed is err
+    assert update_failure_policy(typed) == ("internal", True, "update_internal_failure")
 
 
 def test_windows_assign_job_falls_back_when_breakaway_forbidden():
