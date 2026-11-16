@@ -475,7 +475,7 @@ def test_typed_catalog_error_rebuilds_http_malformed_and_host_misses():
     feed = ReleaseFetchError("invalid_release_json")
     rebuilt = component_update.typed_catalog_error(feed)
     assert rebuilt.code == "invalid_release_json"
-    assert rebuilt.category == "temporary_network"
+    assert rebuilt.category == "internal"
 
     child = RuntimeError("MindIE runtime failed; not retried")
     child.returncode = 1
@@ -521,8 +521,39 @@ def test_select_main_emits_static_fetch_error_without_traceback(tmp_path, monkey
             component_update.main()
     assert ctx.value.code == 1
     assert json.loads(stdout.getvalue()) == {
-        "error": {"code": "release_http_error", "status": 403, "type": "CatalogError"},
+        "error": {"code": "release_http_error", "status": 403, "type": "CatalogError",
+                  "category": "temporary_network"},
     }
+
+
+def test_remote_json_provenance_survives_catalog_child_transport():
+    from mindie_knowledge.releases_io import _remote_json, ReleaseFetchError
+
+    with pytest.raises(ReleaseFetchError) as caught:
+        _remote_json(b'{"private-response":')
+    remote = component_update.typed_catalog_error(caught.value)
+    assert remote.code == "invalid_release_json"
+    assert remote.category == "temporary_network"
+    stdout = io.StringIO()
+    with patch("sys.stdout", stdout), pytest.raises(SystemExit):
+        component_update.emit_catalog_error(remote)
+    assert "private-response" not in stdout.getvalue()
+    child = RuntimeError("component helper failed")
+    child.mindie_output = stdout.getvalue()
+    rebuilt = component_update.typed_catalog_error(child)
+    assert rebuilt.code == "invalid_release_json"
+    assert rebuilt.category == "temporary_network"
+
+
+def test_local_json_errors_and_unclassified_child_crashes_stay_internal():
+    local = json.JSONDecodeError("local state is malformed", "", 0)
+    assert component_update.typed_catalog_error(local) is local
+    child = RuntimeError("component helper failed")
+    child.mindie_output = json.dumps({"error": {"type": "ValueError"}})
+    assert component_update.typed_catalog_error(child) is child
+    child.mindie_output = json.dumps({"error": {
+        "type": "ReleaseFetchError", "code": "invalid_release_json"}})
+    assert component_update.typed_catalog_error(child).category == "internal"
 
 
 def test_check_rebuilds_child_fetch_code_from_process_stdout(tmp_path):

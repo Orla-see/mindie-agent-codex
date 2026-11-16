@@ -21,6 +21,36 @@ from update_lock import file_lock
 
 
 class UpdateTests(unittest.TestCase):
+    def test_remote_json_and_local_parser_fault_keep_distinct_diagnostics(self):
+        from mindie_knowledge.releases_io import _remote_json, ReleaseFetchError
+        from mindie_diagnostics.integration import configure_reporting
+        from mindie_diagnostics.ingestion import ingest
+        from mindie_diagnostics.outbox import Outbox
+
+        policy = Path(os.environ['MINDIE_DIAGNOSTICS_CONFIG'])
+        logs = Path(os.environ['MINDIE_DIAGNOSTICS_ROOT'])
+        configure_reporting(True, config=policy, roots=[str(logs)])
+        with self.assertRaises(ReleaseFetchError) as caught:
+            _remote_json(b'{"private-response":')
+        for error in (caught.exception, ValueError("private-local-parser"),
+                      ReleaseFetchError("invalid_release_json")):
+            with self.subTest(error=type(error).__name__):
+                (self.state / "status.json").write_text(json.dumps(dict(
+                    status="failed", checked_at=0, last_successful_check=100)))
+                with patch("mindie_knowledge.releases_io.fetch_releases", side_effect=error), \
+                        patch.object(update, "_native_install") as install:
+                    result = update.check(self.config)
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["stage"], "release_selection")
+                self.assertEqual(result["last_successful_check"], 100)
+                self.assertNotIn("private-", json.dumps(result))
+                install.assert_not_called()
+        events = [json.loads(line) for path in logs.glob("events/*/*.jsonl")
+                  for line in path.read_text().splitlines()]
+        self.assertEqual([event["attributes"]["category"] for event in events],
+                         ["connectivity", "internal", "internal"])
+        self.assertEqual(ingest(logs, Outbox(self.root / "queue.db"), config=policy)["enqueued"], 2)
+
     def test_owned_update_fault_is_recorded_and_ingested_with_failed_receipt(self):
         from mindie_diagnostics.integration import configure_reporting
         from mindie_diagnostics.ingestion import ingest
