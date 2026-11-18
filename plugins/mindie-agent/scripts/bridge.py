@@ -204,6 +204,10 @@ def hook_event(raw):
         turn_id=event["turn_id"],
         cwd=cwd,
     )
+    if event.get("workspace_root") is not None:
+        forwarded["workspace_root"] = _bounded_path(
+            event.get("workspace_root"), "workspace_root"
+        )
     forwarded["transcript_path"] = transcript
     return forwarded
 
@@ -275,14 +279,6 @@ def _runtime_identity():
 
 
 def activate(operation, *, domain=None):
-    if operation == "activate":
-        from admission_ops import admission, native_session, read_config
-        from manual_entry import explain_inactive_session
-        config = read_config()
-        session = native_session()
-        if admission(config).knowledge_lease(session) is None:
-            raise Inactive(explain_inactive_session(
-                config_path(), session, admission_path=config.get("admission_path")))
     sessions = Sessions()
     if operation == "activate" and domain is not None:
         # Target-domain activation returns its own lease and domain facts. It
@@ -400,31 +396,66 @@ def _observe_stop(result):
     return False
 
 
+def _in_project_scope(path_value, settings):
+    if not isinstance(path_value, str) or not os.path.isabs(path_value):
+        return False
+    try:
+        root = Path(sharing.canonical_root(path_value))
+    except TimeoutError:
+        raise
+    except (OSError, ValueError):
+        return False
+    return any(root.is_relative_to(Path(allowed)) for allowed in settings["project_roots"])
+
+
+def _event_out_of_scope(event, settings):
+    """Verify current Stop cwd/workspace_root before opening transcript or SQLite."""
+    if not _in_project_scope(event.get("cwd"), settings):
+        return True
+    workspace_root = event.get("workspace_root")
+    if workspace_root is not None and not _in_project_scope(workspace_root, settings):
+        return True
+    return False
+
+
+def _transcript_out_of_scope(event, settings, adapter):
+    """Pre-SQLite scope check reusing codex_transcript's single 1 MiB header parser."""
+    try:
+        import codex_transcript
+        native_ctx = adapter.get("native_context") if isinstance(adapter, dict) else None
+        raw_home = (native_ctx or {}).get("CODEX_HOME") or os.environ.get("CODEX_HOME")
+        source = codex_transcript.capture_source(
+            event["transcript_path"], event["session_id"], codex_home=raw_home
+        )
+        return not _in_project_scope(source["project_root"], settings)
+    except TimeoutError:
+        raise
+    except Exception:
+        return False
+
+
 def stop(*, adapter=None, hook_input=None):
     try:
+        config_file = config_path()
         if adapter is None:
             from product_contract import read_json
-            adapter = read_json(config_path())[0]
+            adapter = read_json(config_file)[0]
         if not isinstance(adapter, dict):
             raise ValueError("invalid Stop binding")
-        from admission_ops import admission
-        authority = admission(adapter)
-        native = os.environ.get("CODEX_THREAD_ID")
-        enabled = (authority.knowledge_lease(native) is not None if native else
-                   any(lease.get("entry_enabled") for lease in authority.leases()))
-        if not enabled:
+        if not adapter.get("community_config"):
             print("{}")
             return 0
-        settings = sharing.read(adapter=adapter)
-        # Missing setup is an Agent diagnostic; an explicit disable is inert.
-        # Neither branch reads stdin, starts a helper or creates a capture row.
+        settings = sharing.read(config_file, adapter=adapter)
+        # Check community consent + configuration first before touching SQLite.
+        # Unconfigured or disabled sharing exits cleanly in <100ms without SQLite.
         if settings is None:
-            disabled = sharing.status(adapter=adapter).get("state") == "disabled"
-            if not disabled:
-                _record_stop("configuration", "missing_configuration")
+            if sharing.status(config_file, adapter=adapter).get("state") == "malformed":
+                _record_stop("configuration", "unavailable")
+                print("{}")
+                return 1
             print("{}")
-            return 0 if disabled else 1
-        if not settings["enabled"] or sharing.consent_allows(settings) is False:
+            return 0
+        if not settings["enabled"] or sharing.consent_allows(settings, config_file) is False:
             print("{}")
             return 0
     except TimeoutError:
@@ -446,9 +477,20 @@ def stop(*, adapter=None, hook_input=None):
             _record_stop("envelope", "identity_mismatch")
             print("{}")
             return 1
-        if authority.knowledge_lease(event["session_id"]) is None:
+        if _event_out_of_scope(event, settings) or _transcript_out_of_scope(event, settings, adapter):
             print("{}")
             return 0
+        adm_raw = adapter.get("admission_path")
+        if isinstance(adm_raw, str) and os.path.isabs(adm_raw) and Path(adm_raw).is_file():
+            from admission_ops import admission
+            status = admission(adapter).inspect(event["session_id"]).get("status")
+            if status == "inactive":
+                print("{}")
+                return 0
+            if status == "unavailable":
+                _record_stop("admission", "unavailable")
+                print("{}")
+                return 1
     except ValueError as exc:
         if str(exc) in {"unexpected hook event", "recursive Stop is not a capture"}:
             print("{}")

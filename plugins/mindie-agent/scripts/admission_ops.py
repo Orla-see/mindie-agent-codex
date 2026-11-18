@@ -153,6 +153,13 @@ def operation(name, payload):
                 raise ValueError(
                     "multi-domain deactivation is unavailable in the installed knowledge runtime"
                 ) from exc
+            for candidate_cfg in [config, *domain_configs.values()]:
+                try:
+                    _seed_missing_for_deactivation(admission(candidate_cfg), session)
+                except TimeoutError:
+                    raise
+                except Exception:
+                    pass
             result = deactivate_registered_domains(
                 config["engine_config"],
                 domain_configs=domain_configs,
@@ -162,8 +169,75 @@ def operation(name, payload):
         # No configured domains: preserve the installed default-only path and
         # do not import the newer helper.
         store = admission(config)
+        _seed_missing_for_deactivation(store, session)
         store.deactivate(session)
         return dict(status="inactive", session_id=session)
+    if name == "stop_capture":
+        event = payload.get("event")
+        if not isinstance(event, dict):
+            raise ValueError("stop_capture requires the forwarded Stop event")
+        session = event.get("session_id")
+        if not isinstance(session, str) or not IDENTITY.fullmatch(session):
+            raise ValueError("Valid MindIE session identity required")
+        import sharing
+        if not config.get("community_config"):
+            return dict(stage="inert", reason="sharing-disabled")
+        settings = sharing.read(adapter=config)
+        if settings is None:
+            if sharing.status(adapter=config).get("state") == "malformed":
+                return dict(stage="unavailable", reason="missing-configuration")
+            return dict(stage="inert", reason="sharing-disabled")
+        if not settings["enabled"] or sharing.consent_allows(settings) is False:
+            return dict(stage="inert", reason="sharing-disabled")
+        if not _event_in_scope(event.get("cwd"), settings):
+            return dict(stage="inert", reason="out-of-scope")
+        if event.get("workspace_root") is not None and not _event_in_scope(
+            event.get("workspace_root"), settings
+        ):
+            return dict(stage="inert", reason="out-of-scope")
+        import codex_transcript
+        source = codex_transcript.capture_source(event.get("transcript_path"), session)
+        candidate = dict(project_root=source["project_root"], root_session=session,
+                         activated_at=max(settings["enabled_at"], source["created_at"]))
+        if not sharing.capture_allowed(candidate, None, adapter=config):
+            return dict(stage="inert", reason="out-of-scope")
+        store = admission(config)
+        inspected = store.inspect(session)
+        if inspected.get("status") == "unavailable":
+            return dict(
+                stage="unavailable", reason="admission-unreadable",
+                cause="admission-unreadable",
+            )
+        if inspected.get("status") == "inactive":
+            return dict(stage="inert", reason="task-revoked")
+        lease = store.knowledge_lease(session)
+        from mindie_knowledge.filesystem import path_identity
+        lease_root = (
+            sharing.strip_windows_extended_prefix(source["project_root"])
+            if os.name == "nt"
+            else source["project_root"]
+        )
+        if (
+            lease is None
+            or not isinstance(lease.get("project_root"), str)
+            or path_identity(lease["project_root"]) != path_identity(lease_root)
+        ):
+            store.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            lease = store.activate(
+                session,
+                project_root=lease_root,
+                root_session=session,
+                not_before=0.0,
+            )
+        turn = event.get("turn_id")
+        if not isinstance(turn, str) or not IDENTITY.fullmatch(turn):
+            raise ValueError("invalid hook identity")
+        forwarded = dict(event, transcript_path=source["transcript_path"],
+                         mindie_activation=lease["token"], harness="codex")
+        from mindie_knowledge.loop.cli import capture_hook
+
+        result = capture_hook(config["engine_config"], forwarded)
+        return result if isinstance(result, dict) else dict(stage="unavailable", reason="internal")
     store = admission(config)
     if name == "check":
         lease = store.check(checked_session(payload), checked_token(payload))
@@ -203,50 +277,31 @@ def operation(name, payload):
             checked_session(payload), token, payload.get("succeeded") is True
         )
         return dict(status="recorded")
-    if name == "stop_capture":
-        event = payload.get("event")
-        if not isinstance(event, dict):
-            raise ValueError("stop_capture requires the forwarded Stop event")
-        session = event.get("session_id")
-        if not isinstance(session, str) or not IDENTITY.fullmatch(session):
-            raise ValueError("Valid MindIE session identity required")
-        import sharing
-        lease = store.knowledge_lease(session)
-        if lease is None:
-            return dict(stage="inert", reason="manual-entry-required")
-        settings = sharing.read(adapter=config)
-        if settings is None:
-            if sharing.status(adapter=config).get("state") == "disabled":
-                return dict(stage="inert", reason="sharing-disabled")
-            return dict(stage="unavailable", reason="missing-configuration")
-        if not settings['enabled'] or sharing.consent_allows(settings) is False:
-            return dict(stage="inert", reason="sharing-disabled")
-        import codex_transcript
-        source = codex_transcript.capture_source(event.get('transcript_path'), session)
-        candidate = dict(project_root=source['project_root'], root_session=session,
-                         activated_at=max(settings['enabled_at'], source['created_at']))
-        if not sharing.capture_allowed(candidate, None, adapter=config):
-            return dict(stage="inert", reason="out-of-scope")
-        inspected = store.inspect(session)
-        if inspected.get("status") == "unavailable":
-            return dict(
-                stage="unavailable", reason="admission-unreadable",
-                cause="admission-unreadable",
-            )
-        if inspected.get('status') == 'inactive':
-            return dict(stage='inert', reason='task-revoked')
-        turn = event.get("turn_id")
-        if not isinstance(turn, str) or not IDENTITY.fullmatch(turn):
-            raise ValueError("invalid hook identity")
-        forwarded = dict(event, transcript_path=source['transcript_path'],
-                         mindie_activation=lease["token"], harness="codex")
-        from mindie_knowledge.loop.cli import capture_hook
-
-        result = capture_hook(config["engine_config"], forwarded)
-        return result if isinstance(result, dict) else dict(stage="unavailable", reason="internal")
     raise ValueError("unsupported admission operation")
 
 
+def _seed_missing_for_deactivation(store, session):
+    if store.inspect(session).get("status") == "missing":
+        store.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        store.activate(
+            session,
+            project_root=str(Path.cwd().resolve()),
+            root_session=session,
+            not_before=0.0,
+        )
+
+
+def _event_in_scope(path_value, settings):
+    import sharing
+    if not isinstance(path_value, str) or not os.path.isabs(path_value):
+        return False
+    try:
+        target = Path(sharing.canonical_root(path_value))
+    except TimeoutError:
+        raise
+    except (OSError, ValueError):
+        return False
+    return any(target.is_relative_to(Path(allowed)) for allowed in settings["project_roots"])
 def main():
     try:
         if len(sys.argv) not in (2, 3):

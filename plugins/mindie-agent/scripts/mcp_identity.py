@@ -2,15 +2,14 @@
 
 [Role]
 Validates task/turn metadata and signals matching in-flight requests for native
-interruption, while providing zero-gate optional identity resolution for public
-deterministic surfaces (`remote` and `components`).
+interruption, while providing zero-gate optional identity resolution across all
+MCP surfaces (`remote`, `components`, and `knowledge`).
 
 [Invariants]
-- Public deterministic surfaces (`remote`, `components`) accept standard MCP
-  calls with zero `_meta`, partial `_meta` (`threadId`/`sessionId`), or full
-  `x-codex-turn-metadata`, falling back to the MCP connection scope without
+- All MCP surfaces (`remote`, `components`, `knowledge`) accept standard MCP
+  calls with zero `_meta`, partial `_meta` (`threadId`/`sessionId`/`conversationId`),
+  or full `x-codex-turn-metadata`, falling back to the MCP connection scope without
   failing closed. Contradictory or malformed metadata strings are still rejected.
-- Private `knowledge` surface calls still require verified native metadata.
 - Interrupts only signal calls already registered for that exact thread/turn;
   they never claim that execution or cleanup completed.
 
@@ -37,7 +36,12 @@ def native_identity(request):
     Tool arguments and a parent lease are never fallbacks.
     """
     params = request.get("params")
-    if not isinstance(params, dict) or not isinstance(params.get("arguments"), dict):
+    if not isinstance(params, dict):
+        raise ValueError("Invalid MindIE tool arguments")
+    args = params.get("arguments")
+    if args is None:
+        params["arguments"] = {}
+    elif not isinstance(args, dict):
         raise ValueError("Invalid MindIE tool arguments")
     meta = params.get("_meta")
     turn = meta.get("x-codex-turn-metadata") if isinstance(meta, dict) else None
@@ -84,7 +88,12 @@ def optional_native_identity(request, *, default_session: str) -> str:
     fields that ARE present must still be well-formed and non-contradictory.
     """
     params = request.get("params")
-    if not isinstance(params, dict) or not isinstance(params.get("arguments"), dict):
+    if not isinstance(params, dict):
+        raise ValueError("Invalid MindIE tool arguments")
+    args = params.get("arguments")
+    if args is None:
+        params["arguments"] = {}
+    elif not isinstance(args, dict):
         raise ValueError("Invalid MindIE tool arguments")
     meta = params.get("_meta")
     if meta is None:

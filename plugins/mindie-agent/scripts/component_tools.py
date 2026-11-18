@@ -84,6 +84,17 @@ DESCRIPTIONS = {
         "CANN `plog`s in-place (`python3 -m mindie_debugger.cli triage`) or run `ACLGraphCaptureGuard`, "
         "`ACLGraphAddressTracker`, `ACLGraphDumper`, `ACLGraphVllmInspector`, and `precision` inside the NPU container."
     ),
+    "rsi_loop": (
+        "Coordinate optional iterative optimization rounds (init, next, complete, finish) "
+        "over an experiment ledger via mindie_harness.rsi.rsi_loop. Pass CLI arguments as "
+        "an argv array, e.g. ['--help'] or ['next', '--state', 'rsi-state.json']."
+    ),
+    "experiment_ledger": (
+        "Manage deterministic experiment ledger fingerprinting, paired-trial statistical "
+        "judging, leave-one-out attribution checks, and rendering via "
+        "mindie_harness.rsi.experiment_ledger. Pass CLI arguments as an argv array, e.g. "
+        "['fingerprint', '.'] or ['--help']."
+    ),
 }
 
 
@@ -137,6 +148,9 @@ def command(adapter, component):
         return configured
     if component == "diagnostics":
         return [adapter["python"], "-I", "-X", "utf8", "-m", "mindie_diagnostics.cli"]
+    if component in {"rsi_loop", "experiment_ledger"}:
+        scripts_dir = Path(adapter.get("runtime_scripts") or Path(__file__).resolve().parent)
+        return [adapter["python"], "-I", "-X", "utf8", str(scripts_dir / (component + ".py"))]
     name = "mindie-" + component
     runtime_bins = [str(Path(adapter["python"]).parent)]
     if Path(adapter["python"]) == Path(sys.executable):
@@ -148,7 +162,7 @@ def command(adapter, component):
     )
     if executable is None:
         raise FileNotFoundError(
-            "mindie-" + component + " is not installed on PATH; install the component "
+            name + " is not installed on PATH; install the component "
             "or configure component_commands." + component + " in the adapter")
     return [executable]
 
