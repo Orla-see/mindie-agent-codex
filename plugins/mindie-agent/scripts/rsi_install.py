@@ -29,7 +29,10 @@ def _atomic_write(path: Path, content: str, *, executable: bool = False) -> bool
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(content, encoding="utf-8", newline="\n")
+    # ``Path.write_text`` did not accept ``newline`` on the Python 3.9
+    # runtime shipped on some MindIE hosts.  The generated files contain
+    # explicit LF text already, so the portable call is sufficient here.
+    temporary.write_text(content, encoding="utf-8")
     if executable:
         temporary.chmod(temporary.stat().st_mode | 0o111)
     os.replace(temporary, path)
