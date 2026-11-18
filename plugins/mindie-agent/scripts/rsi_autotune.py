@@ -289,7 +289,8 @@ class AutotuneController:
         return queue
 
     def _payload(self, item: Mapping[str, Any], state: Mapping[str, Any]) -> dict[str, Any]:
-        return {"schema": SCHEMA, "task_id": self.plan["task_id"],
+        controls = dict(self.plan["payload"])
+        payload = {"schema": SCHEMA, "task_id": self.plan["task_id"],
                 "endpoint": self.plan["endpoint"], "source_root": self.plan["source_root"],
                 "rsi_root": self.plan["rsi_root"], "baseline": self.plan["baseline"],
                 "objective": self.plan["objective"], "devices": self.plan["devices"],
@@ -297,7 +298,16 @@ class AutotuneController:
                 "current_best": dict(state.get("best") or {}),
                 "cost_model": state.get("cost_model"),
                 "memory_matches": state.get("memory_matches", []),
-                "controls": dict(self.plan["payload"])}
+                "controls": controls}
+        # Runtime adapters receive a stable top-level action payload.  Keep the
+        # complete plan under ``controls`` for auditability, while forwarding
+        # the concrete deployment and command bindings needed by legacy
+        # adapters that do not inspect the nested controls object.
+        for key in ("deployment", "build_cmd", "profile_cmd", "token_forcing_cmd",
+                    "benchmark_cmd", "teacher_forcing_scorer_cmd", "timeout_s"):
+            if key in controls:
+                payload[key] = controls[key]
+        return payload
 
     def _operations(self) -> list[str]:
         ordered = ("prepare", "build", "profile", "accuracy", "performance")
