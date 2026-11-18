@@ -102,3 +102,38 @@ def test_cli_dry_run_is_machine_readable(tmp_path, capsys):
     body = json.loads(capsys.readouterr().out)
     assert body["status"] == "completed"
     assert body["best"]["candidate_id"] == "baseline-control"
+
+
+def test_auto_proposer_persists_cost_model_and_memory(tmp_path):
+    value = plan(tmp_path)
+    value["payload"] = {
+        "auto_propose": True,
+        "max_candidates": 1,
+        "profile_observations": [{
+            "elapsed_ms": 1000, "completion_tokens": 100,
+            "baseline_elapsed_ms": 1200, "baseline_tokens": 100,
+            "verify_ms": 700,
+        }],
+    }
+    runner = ScriptedRunner()
+    controller = rsi_autotune.AutotuneController(value, runner, tmp_path / "state")
+    result = controller.run_once()
+    assert result["best"]["candidate_id"] != "baseline-control"
+    assert json.loads((tmp_path / "state" / "cost-model.json").read_text())["largest_gap"] == "verify"
+    assert json.loads((tmp_path / "state" / "memory.jsonl").read_text())["candidate_id"] == result["best"]["candidate_id"]
+
+
+def test_sealed_final_payload_overrides_asserted_runtime_gate(tmp_path):
+    value = plan(tmp_path)
+    value["payload"]["sealed_final_payload"] = {
+        "unseen_prompts": [{"id": "u1"}, {"id": "u2"}, {"id": "u3"}],
+        "long_outputs": [{"id": "l1", "output_tokens": 1024}],
+        "paired_speedups": [1.2, 1.25, 1.3],
+        "token_forcing_rows": [{"teacher_forced": True, "token_match": False}],
+    }
+    runner = ScriptedRunner()
+    controller = rsi_autotune.AutotuneController(value, runner, tmp_path / "state")
+    result = controller.run_once()
+    assert result["best"]["candidate_id"] == "baseline-control"
+    candidate = next(iter(result["results"].values()))
+    assert candidate["gates"]["sealed_final"] is False

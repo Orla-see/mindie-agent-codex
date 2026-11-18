@@ -25,9 +25,17 @@ from typing import Any, Iterable, Mapping, Sequence
 try:
     from rsi_plan import SCHEMA, PlanError, validate
     from rsi_install import install as install_rsi_entry
+    from rsi_cost_model import plan_from_payload
+    from rsi_memory import MemoryStore
+    from rsi_proposals import propose
+    from rsi_sealed_final import evaluate as evaluate_sealed_final
 except ImportError:  # pragma: no cover - direct package execution fallback
     from .rsi_plan import SCHEMA, PlanError, validate
     from .rsi_install import install as install_rsi_entry
+    from .rsi_cost_model import plan_from_payload
+    from .rsi_memory import MemoryStore
+    from .rsi_proposals import propose
+    from .rsi_sealed_final import evaluate as evaluate_sealed_final
 
 
 STATE_SCHEMA = "mindie-agent/rsi-autotune-state/v1"
@@ -227,6 +235,28 @@ class AutotuneController:
         self.state_path = self.state_dir / "autotune-state.json"
         self.queue_path = self.state_dir / "autotune-queue.json"
         self.active_path = self.state_dir / "active-best.json"
+        self.cost_model_path = self.state_dir / "cost-model.json"
+        self.memory_path = self.state_dir / "memory.jsonl"
+        self.memory = MemoryStore(self.memory_path)
+
+    def _deployment_signature(self) -> str:
+        endpoint = self.plan["endpoint"]
+        value = {"host": endpoint["host"], "port": endpoint["port"],
+                 "source_root": self.plan["source_root"],
+                 "rsi_root": self.plan["rsi_root"],
+                 "baseline": self.plan["baseline"],
+                 "devices": self.plan["devices"]}
+        return hashlib.sha256(_json(value).encode()).hexdigest()[:24]
+
+    def _prepare_metadata(self, state: dict[str, Any]) -> None:
+        """Persist the cost-model and expose replayable memory to runners."""
+        report = plan_from_payload(self.plan["payload"])
+        if report is not None:
+            state["cost_model"] = report
+            _write(self.cost_model_path, report)
+        elif isinstance(_read(self.cost_model_path, None), dict):
+            state["cost_model"] = _read(self.cost_model_path, {})
+        state["memory_matches"] = self.memory.find(self._deployment_signature())
 
     def _load_state(self) -> dict[str, Any]:
         value = _read(self.state_path, {})
@@ -239,11 +269,19 @@ class AutotuneController:
         value.setdefault("best", {"candidate_id": "baseline-control", "speedup": 1.0})
         return value
 
-    def _load_queue(self) -> dict[str, Any]:
+    def _load_queue(self, state: Mapping[str, Any]) -> dict[str, Any]:
         old = _read(self.queue_path, {})
         if isinstance(old, dict) and isinstance(old.get("candidates"), list):
             return old
-        candidates = expand_candidates(self.plan["payload"],
+        candidate_payload = self.plan["payload"]
+        if (candidate_payload.get("auto_propose")
+                and candidate_payload.get("candidates") is None):
+            candidate_payload = {
+                **candidate_payload,
+                "candidates": propose(candidate_payload, state.get("cost_model"),
+                                      state.get("memory_matches", ())),
+            }
+        candidates = expand_candidates(candidate_payload,
                                        limit=int(self.plan["payload"].get("max_candidates", 256)))
         queue = {"schema": "mindie-agent/rsi-autotune-queue/v1",
                  "candidates": candidates, "counts": {"pending": len(candidates)}}
@@ -256,7 +294,10 @@ class AutotuneController:
                 "rsi_root": self.plan["rsi_root"], "baseline": self.plan["baseline"],
                 "objective": self.plan["objective"], "devices": self.plan["devices"],
                 "bindings": self.plan.get("bindings"), "candidate": dict(item),
-                "current_best": dict(state.get("best") or {})}
+                "current_best": dict(state.get("best") or {}),
+                "cost_model": state.get("cost_model"),
+                "memory_matches": state.get("memory_matches", []),
+                "controls": dict(self.plan["payload"])}
 
     def _operations(self) -> list[str]:
         ordered = ("prepare", "build", "profile", "accuracy", "performance")
@@ -286,20 +327,33 @@ class AutotuneController:
 
         accuracy = receipts.get("accuracy", {})
         performance = receipts.get("performance", {})
+        sealed_report: Mapping[str, Any] | None = None
+        sealed_input = (item.get("sealed_final_payload")
+                        or self.plan["payload"].get("sealed_final_payload")
+                        or performance.get("sealed_final_payload"))
+        if isinstance(sealed_input, Mapping):
+            sealed_report = evaluate_sealed_final(sealed_input)
         gates: dict[str, bool] = {
             "benchmark_passed": _passed(performance, "benchmark_passed", "passed") is True,
             "correctness_passed": _passed(accuracy, "correctness_passed", "passed") is True,
             "teacher_forced": _passed(accuracy, "teacher_forced") is True,
             "paper_ready": _passed(accuracy, "paper_ready") is True,
-            "sealed_final": (_passed(performance, "sealed_final") is True
-                             or _passed(accuracy, "sealed_final") is True),
+            "sealed_final": (bool(sealed_report.get("passed")) if sealed_report is not None
+                              else (_passed(performance, "sealed_final") is True
+                                    or _passed(accuracy, "sealed_final") is True)),
         }
         lower_bound = _lower_bound(performance)
+        if sealed_report is not None and isinstance(
+                sealed_report.get("paired_speedup_ci_lower_bound"), (int, float)):
+            lower_bound = float(sealed_report["paired_speedup_ci_lower_bound"])
         gates["paired_speed_ci"] = lower_bound is not None and lower_bound > self.min_speedup
         passed = all(gates.get(name, False) for name in self.required_gates) and gates["paired_speed_ci"]
-        return {"status": "passed" if passed else "evaluated", "gates": gates,
+        result = {"status": "passed" if passed else "evaluated", "gates": gates,
                 "paired_speedup_ci_lower_bound": lower_bound, "receipts": receipts,
                 "candidate_id": item["candidate_id"]}
+        if sealed_report is not None:
+            result["sealed_final_report"] = dict(sealed_report)
+        return result
 
     def _cleanup(self, payload: Mapping[str, Any], receipts: Mapping[str, Any]) -> None:
         if "cleanup" not in self.plan["operations"]:
@@ -332,7 +386,8 @@ class AutotuneController:
 
     def run_once(self) -> dict[str, Any]:
         state = self._load_state()
-        queue = self._load_queue()
+        self._prepare_metadata(state)
+        queue = self._load_queue(state)
         wave = self._select_wave(queue, state)
         if not wave:
             return {"status": "idle", "reason": "no_pending_candidates", "best": state.get("best")}
@@ -377,6 +432,21 @@ class AutotuneController:
                 best = {"candidate_id": cid, "method": item.get("method"),
                         "speedup": candidate_speedup, "binding": item.get("binding") or item.get("runtime_binding") or {},
                         "round": state["round"], "updated_unix": time.time()}
+                self.memory.append({
+                    "deployment_signature": self._deployment_signature(),
+                    "candidate_id": cid,
+                    "mechanism": str(item.get("method") or "candidate"),
+                    "code_delta": item.get("patch") or item.get("patch_ref"),
+                    "requirements": item.get("requirements") or {},
+                    "correctness_contract": {"gates": result.get("gates", {})},
+                    "performance_evidence": {
+                        "paired_speedup_ci_lower_bound": candidate_speedup,
+                        "receipts": result.get("receipts", {}),
+                    },
+                    "applicability": {"objective": self.plan["objective"],
+                                      "devices": self.plan["devices"]},
+                    "limits": result.get("sealed_final_report", {}).get("failure_reasons", []),
+                })
         state["best"] = best
         state["active_candidate"] = None
         state["status"] = "idle" if not any(x.get("status") == "unknown" for x in results.values()) else "needs_reconcile"

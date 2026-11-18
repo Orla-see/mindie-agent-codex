@@ -65,3 +65,34 @@ python3 plugins/mindie-agent/scripts/rsi_autotune.py plan.json \
 ```
 
 The plugin remains host-neutral: `/home/customer/RSI`, the SSH endpoint, source checkout, devices, candidate URLs, runtime entry, and builder recipes all come from installation/runtime bindings. The plan does not copy the 139-host paths into the plugin.
+
+## Paper-loop capabilities imported from an existing RSI runtime
+
+The controller also contains the reusable parts found in the 139-host
+`/home/l00899187/RSI` tree, without copying that host's paths or runtime
+commands into the plugin:
+
+- `scripts/rsi_cost_model.py` consumes repeated profiler observations and
+  writes `cost-model.json` with a conservative ceiling, acceptance statistics,
+  stage fractions, confidence, evidence gaps, and the largest bottleneck.
+- `scripts/rsi_proposals.py` turns that bottleneck into a bounded, deterministic
+  shortlist when `payload.auto_propose` is enabled. It emits candidate data;
+  build and deployment remain the binding-selected runtime's responsibility.
+- `scripts/rsi_workspace.py` applies a unified diff in a detached git worktree
+  using argv-only git calls and removes the worktree on failure. This keeps a
+  source checkout reusable across customers.
+- `scripts/rsi_memory.py` stores mechanism, requirements, correctness contract,
+  performance evidence, applicability, and limits in an append-only JSONL file.
+  Matching entries are included in the next candidate payload for replay.
+- `scripts/rsi_sealed_final.py` validates independent unseen prompts, long
+  outputs, holdout disjointness, strict teacher-forced token rows, and a
+  bootstrap paired-speed CI. If `sealed_final_payload` is supplied, the
+  controller uses this report for the sealed-final and speed gates; missing
+  evidence fails closed.
+
+These modules are deliberately evidence-driven. They do not invent a passing
+result when the customer runtime has not returned profiler, scorer, and paired
+benchmark rows. The runtime binding still needs to provide the actual MindIE
+profiler, teacher-forcing scorer, build/deploy adapter, and NPU lease. The
+existing `/home/l00899187/RSI/rsi-mindie` scripts provide those 139-host
+adapters; customers bind equivalent adapters for their own host and layout.
