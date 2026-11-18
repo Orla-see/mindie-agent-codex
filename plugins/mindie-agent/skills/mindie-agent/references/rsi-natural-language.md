@@ -33,3 +33,15 @@ The conversational executor follows this order:
 6. Promote `active-best` only when the runtime reports all requested gates (`benchmark_passed`, `correctness_passed`, `teacher_forced`, `paper_ready`, `sealed_final`) and the paired speed confidence interval clears the configured threshold. Otherwise report the exact failed gate and keep the baseline active.
 
 The plan renderer is intentionally not an executor. It prevents the language layer from becoming a shell proxy while still allowing the existing MindIE MCP tools and the external RSI runtime to do the work.
+
+For unattended multi-round search, run `scripts/rsi_autotune.py` on the selected RSI host with the validated plan. The controller expands `payload.candidates` or a bounded `payload.candidate_space`, runs each wave through the fixed RSI action entry, persists `autotune-state.json` and `autotune-queue.json`, and writes `active-best.json` only after the required gates and paired speed lower bound pass. A failed candidate is cleaned up; an `unknown`, `running`, or `submitted` receipt moves the loop to `needs_reconcile` and is never resubmitted automatically. `parallel_workers` controls bounded fan-out, while each candidate's binding must provide isolated devices and service ports when physical workloads run in parallel.
+
+Example invocation after the plan has been written to the customer host:
+
+```bash
+python3 plugins/mindie-agent/scripts/rsi_autotune.py plan.json \
+  --state-dir /home/customer/RSI/.mindie-agent/decode-latency \
+  --parallel-workers 2 --max-rounds 8
+```
+
+The plugin remains host-neutral: `/home/customer/RSI`, the SSH endpoint, source checkout, devices, candidate URLs, and builder recipes all come from the plan and its per-run bindings. The controller does not copy the 139-host paths into the plugin.
