@@ -30,28 +30,11 @@ def base_plan():
 def test_validate_normalizes_defaults_and_render_requires_lease():
     plan = rsi_plan.validate(base_plan())
     assert plan["endpoint"]["user"] == "root"
-    assert plan["action_entry"] == "bin/mindie_agent_rsi_entry.py"
     rendered = rsi_plan.render(plan)
     assert rendered["steps"][0]["tool"] == "remote_write"
     assert json.loads(rendered["steps"][0]["arguments"]["content"])["source_root"] == "/home/user/model"
     assert rendered["steps"][2]["requires"] == ["coordinator.lease"]
     assert rendered["gates"]["sealed_final"] is True
-
-
-def test_custom_action_entry_is_relative_to_rsi_root():
-    plan = base_plan()
-    plan["action_entry"] = "rsi-mindie/bin/mindie_agent_rsi_entry.py"
-    rendered = rsi_plan.render(plan)
-    commands = [step["arguments"]["cmd"] for step in rendered["steps"][1:]]
-    assert any("python3 rsi-mindie/bin/mindie_agent_rsi_entry.py profile" in cmd
-               for cmd in commands)
-
-
-def test_action_entry_cannot_escape_rsi_root():
-    plan = base_plan()
-    plan["action_entry"] = "../bin/mindie_agent_rsi_entry.py"
-    with pytest.raises(rsi_plan.PlanError, match="relative entry path"):
-        rsi_plan.validate(plan)
 
 
 @pytest.mark.parametrize("field", ["source_root", "rsi_root"])

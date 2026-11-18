@@ -24,8 +24,10 @@ from typing import Any, Iterable, Mapping, Sequence
 
 try:
     from rsi_plan import SCHEMA, PlanError, validate
+    from rsi_install import install as install_rsi_entry
 except ImportError:  # pragma: no cover - direct package execution fallback
     from .rsi_plan import SCHEMA, PlanError, validate
+    from .rsi_install import install as install_rsi_entry
 
 
 STATE_SCHEMA = "mindie-agent/rsi-autotune-state/v1"
@@ -172,15 +174,17 @@ class ActionRunner:
     """Invoke the fixed RSI action entry with JSON on stdin."""
 
     def __init__(self, root: str, *, python: str = "python3",
-                 entry: str = "bin/mindie_agent_rsi_entry.py",
-                 timeout_s: int = 3600) -> None:
+                 bindings: str | None = None, timeout_s: int = 3600) -> None:
         self.root = str(root)
         self.python = python
-        self.entry = entry
+        self.entry = "bin/mindie_agent_rsi_entry.py"
+        self.bindings = bindings
         self.timeout_s = timeout_s
 
     def run(self, operation: str, payload: Mapping[str, Any]) -> ActionReceipt:
         command = [self.python, self.entry, operation, "--root", self.root]
+        if self.bindings:
+            command.extend(("--bindings", self.bindings))
         try:
             process = subprocess.run(command, input=_json(payload), text=True,
                                      capture_output=True, timeout=self.timeout_s,
@@ -418,8 +422,11 @@ def main(argv: list[str] | None = None) -> int:
         required = payload.get("required_gates", list(DEFAULT_REQUIRED_GATES))
         if not isinstance(required, list) or any(not isinstance(x, str) for x in required):
             raise AutotuneError("payload.required_gates must be an array of strings")
-        runner = (DryRunRunner() if args.dry_run else
-                  ActionRunner(plan["rsi_root"], entry=plan["action_entry"]))
+        if args.dry_run:
+            runner = DryRunRunner()
+        else:
+            install_rsi_entry(plan["rsi_root"], bindings=plan.get("bindings"))
+            runner = ActionRunner(plan["rsi_root"], bindings=plan.get("bindings"))
         controller = AutotuneController(plan, runner, state_dir, workers=workers,
                                         min_speedup=minimum,
                                         min_relative_improvement=improvement,
