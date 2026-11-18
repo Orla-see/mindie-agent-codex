@@ -418,7 +418,8 @@ def main(argv: list[str] | None = None) -> int:
         required = payload.get("required_gates", list(DEFAULT_REQUIRED_GATES))
         if not isinstance(required, list) or any(not isinstance(x, str) for x in required):
             raise AutotuneError("payload.required_gates must be an array of strings")
-        runner = DryRunRunner() if args.dry_run else ActionRunner(plan["rsi_root"])
+        runner = (DryRunRunner() if args.dry_run else
+                  ActionRunner(plan["rsi_root"], entry=plan["action_entry"]))
         controller = AutotuneController(plan, runner, state_dir, workers=workers,
                                         min_speedup=minimum,
                                         min_relative_improvement=improvement,

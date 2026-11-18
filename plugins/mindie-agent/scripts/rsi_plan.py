@@ -24,6 +24,7 @@ OPERATIONS = (
 )
 _TASK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
 _ABSOLUTE = re.compile(r"^/(?:[^/\x00]+/)*[^/\x00]+$")
+_ENTRY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-/]{0,191}$")
 
 
 class PlanError(ValueError):
@@ -41,6 +42,13 @@ def _remote_path(value: Any, field: str) -> str:
     if not _ABSOLUTE.fullmatch(value) or ".." in value.split("/"):
         raise PlanError(f"{field} must be an absolute remote path without '..'")
     return value.rstrip("/") or "/"
+
+
+def _entry_path(value: Any, field: str) -> str:
+    value = _text(value, field)
+    if not _ENTRY.fullmatch(value) or value.startswith("/") or ".." in value.split("/"):
+        raise PlanError(f"{field} must be a relative entry path without '..'")
+    return value
 
 
 def _int(value: Any, field: str, low: int, high: int) -> int:
@@ -68,6 +76,7 @@ def validate(plan: Any) -> dict[str, Any]:
 
     source_root = _remote_path(plan.get("source_root"), "source_root")
     rsi_root = _remote_path(plan.get("rsi_root"), "rsi_root")
+    action_entry = _entry_path(plan.get("action_entry", "bin/mindie_agent_rsi_entry.py"), "action_entry")
     baseline = _text(plan.get("baseline"), "baseline")
     objective = _text(plan.get("objective"), "objective")
     operations = plan.get("operations")
@@ -98,6 +107,7 @@ def validate(plan: Any) -> dict[str, Any]:
         "endpoint": {"host": host, "port": port, "user": user},
         "source_root": source_root,
         "rsi_root": rsi_root,
+        "action_entry": action_entry,
         "baseline": baseline,
         "objective": objective,
         "operations": list(operations),
@@ -144,7 +154,7 @@ def render(plan: Any) -> dict[str, Any]:
             "tool": "remote_exec_command",
             "arguments": {
                 **common,
-                "cmd": f"python3 bin/mindie_agent_rsi_entry.py {operation} --root {normalized['rsi_root']} < {payload_path}",
+                "cmd": f"python3 {normalized['action_entry']} {operation} --root {normalized['rsi_root']} < {payload_path}",
             },
             "requires": ["coordinator.lease"] if operation in {
                 "run", "resume", "profile", "accuracy", "performance"

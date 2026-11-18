@@ -11,6 +11,7 @@ Required fields are:
   "endpoint": {"host": "80.5.25.139", "port": 22, "user": "root"},
   "source_root": "/home/user/model",
   "rsi_root": "/home/user/RSI",
+  "action_entry": "rsi-mindie/bin/mindie_agent_rsi_entry.py",
   "baseline": "baseline-control",
   "objective": "maximize verified decode throughput",
   "operations": ["doctor", "prepare", "build", "profile", "accuracy", "performance", "record", "cleanup"],
@@ -21,7 +22,7 @@ Required fields are:
 }
 ```
 
-`endpoint` identifies the customer host for this run. `source_root` identifies the checkout being built, and `rsi_root` identifies the installed RSI runtime. They are explicit because a later customer can use another host, checkout, container, or runtime path without changing this plugin. `bindings` is the per-run mapping of candidate URLs, source mounts, devices, and builder commands; it is deployment data, not a global plugin setting.
+`endpoint` identifies the customer host for this run. `source_root` identifies the checkout being built, and `rsi_root` identifies the installed RSI runtime. `action_entry` is an optional relative path under `rsi_root`; it defaults to `bin/mindie_agent_rsi_entry.py`, and allows layouts such as the 139-host `rsi-mindie/bin/mindie_agent_rsi_entry.py` without changing the plugin. They are explicit because a later customer can use another host, checkout, container, or runtime path without changing this plugin. `bindings` is the per-run mapping of candidate URLs, source mounts, devices, and builder commands; it is deployment data, not a global plugin setting.
 
 The conversational executor follows this order:
 
