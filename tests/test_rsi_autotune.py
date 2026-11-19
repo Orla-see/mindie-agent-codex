@@ -55,6 +55,7 @@ class ScriptedRunner:
             return rsi_autotune.ActionReceipt(operation, {
                 "status": "completed", "passed": True,
                 "benchmark_passed": True, "sealed_final": True,
+                "repeats": 3,
                 "paired_speedup_ci_lower_bound": self.speedup,
             })
         return rsi_autotune.ActionReceipt(operation, {"status": "completed"})

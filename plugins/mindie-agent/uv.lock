@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -18,7 +18,7 @@ overrides = [
     { name = "mindie-coordinator", git = "https://github.com/mindie-agent/coordinator?rev=a3c7336faa0bc14ebdb8f2fd75606c82e96422e9" },
     { name = "mindie-debugger", git = "https://github.com/mindie-agent/debugger?rev=e15c2ed38d8f928db67c5bb1a94269f62207227c" },
     { name = "mindie-diagnostics", git = "https://github.com/mindie-agent/diagnostics?rev=7464cbb4381e9dc996871d192eb3f05f61dfdb28" },
-    { name = "mindie-harness", git = "https://github.com/mindie-agent/harness?rev=14313b8ba58c888b20c9c216ec41d14f5e62f4f7" },
+    { name = "mindie-harness", git = "https://github.com/mindie-agent/harness?rev=d23aa2f9c31cbe3bd7a029f7257e032c3cbfde46" },
     { name = "mindie-knowledge", git = "https://github.com/mindie-agent/knowledge?rev=9f48272a3ba87248bfda0e4068692511aac4dfa4" },
     { name = "mindie-profiler", git = "https://github.com/mindie-agent/profiler?rev=b702893129724b852c5abcb8971724b8b0a6e870" },
     { name = "mindie-sim", git = "https://github.com/mindie-agent/sim?rev=83fb8288aa998e0a6ad345ca7a16269f0181545b" },
@@ -1377,7 +1377,7 @@ name = "importlib-metadata"
 version = "9.0.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "zipp", marker = "python_full_version < '3.12'" },
+    { name = "zipp" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6f/7e/1e7e8dc30634b93ebb3d58a3dea569ad146e656218d3960ab04f62047b29/importlib_metadata-9.0.1.tar.gz", hash = "sha256:ab830580bc0ef3db61ce8fae716389e5462b67e033018bab6d8f80ef17172f99", size = 59124, upload-time = "2026-08-28T15:30:34.646Z" }
 wheels = [
@@ -2066,7 +2066,7 @@ requires-dist = [
     { name = "mindie-coordinator", git = "https://github.com/mindie-agent/coordinator?rev=a3c7336faa0bc14ebdb8f2fd75606c82e96422e9" },
     { name = "mindie-debugger", git = "https://github.com/mindie-agent/debugger?rev=e15c2ed38d8f928db67c5bb1a94269f62207227c" },
     { name = "mindie-diagnostics", git = "https://github.com/mindie-agent/diagnostics?rev=7464cbb4381e9dc996871d192eb3f05f61dfdb28" },
-    { name = "mindie-harness", git = "https://github.com/mindie-agent/harness?rev=14313b8ba58c888b20c9c216ec41d14f5e62f4f7" },
+    { name = "mindie-harness", git = "https://github.com/mindie-agent/harness?rev=d23aa2f9c31cbe3bd7a029f7257e032c3cbfde46" },
     { name = "mindie-knowledge", git = "https://github.com/mindie-agent/knowledge?rev=9f48272a3ba87248bfda0e4068692511aac4dfa4" },
     { name = "mindie-profiler", git = "https://github.com/mindie-agent/profiler?rev=b702893129724b852c5abcb8971724b8b0a6e870" },
     { name = "mindie-sim", git = "https://github.com/mindie-agent/sim?rev=83fb8288aa998e0a6ad345ca7a16269f0181545b" },
@@ -2096,7 +2096,7 @@ source = { git = "https://github.com/mindie-agent/diagnostics?rev=7464cbb4381e9d
 [[package]]
 name = "mindie-harness"
 version = "0.1.4"
-source = { git = "https://github.com/mindie-agent/harness?rev=14313b8ba58c888b20c9c216ec41d14f5e62f4f7#14313b8ba58c888b20c9c216ec41d14f5e62f4f7" }
+source = { git = "https://github.com/mindie-agent/harness?rev=d23aa2f9c31cbe3bd7a029f7257e032c3cbfde46#d23aa2f9c31cbe3bd7a029f7257e032c3cbfde46" }
 
 [[package]]
 name = "mindie-knowledge"
@@ -3734,8 +3734,8 @@ name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cryptography", marker = "python_full_version >= '3.15' or sys_platform != 'win32'" },
-    { name = "jeepney", marker = "python_full_version >= '3.15' or sys_platform != 'win32'" },
+    { name = "cryptography" },
+    { name = "jeepney" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [

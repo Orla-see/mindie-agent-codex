@@ -5,6 +5,7 @@ SCRIPTS = Path(__file__).parents[1] / "plugins" / "mindie-agent" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from rsi_compare import compare
+from rsi_memory import distill_request
 from rsi_workload import build_manifest, request_record
 
 
@@ -28,6 +29,12 @@ def test_manifest_prefers_startup_speculative_length():
     manifest = build_manifest({}, startup_text="serve --num-speculative-tokens 9")
     assert manifest["startup_parameters"]["num_speculative_tokens"] == 9
     assert manifest["startup_parameters"]["num_speculative_tokens_source"] == "startup_script"
+
+
+def test_manifest_defaults_to_one_warmup_and_three_measurements():
+    manifest = build_manifest({})
+    assert manifest["warmup_runs"] == 1
+    assert manifest["repeats"] == 3
 
 
 def test_objective_comparison_uses_latency_direction():
@@ -74,3 +81,22 @@ def test_identity_and_task_accuracy_are_separate():
     }, "increase throughput", {"min_speedup": 1.0})
     assert result["output_identity"]["mismatch_pairs"] == 1
     assert result["task_accuracy"]["candidate"] == 1.0
+
+
+def test_distill_records_scenario_without_speculative_length():
+    request = distill_request({
+        "mechanism": "adaptive-runtime-parameter",
+        "mechanism_family": "speculative-decoding",
+        "outcome": "verified",
+        "applicability": {
+            "feature": "adaptive-runtime-parameter",
+            "bottleneck": "memory_bound",
+            "workload": {"batch_size": 1},
+            "num_speculative_tokens": 7,
+        },
+        "performance_evidence": {"num_speculative_tokens": 7, "ci_lower": 1.08},
+    }, deployment_signature="deployment")
+    content = request["inputs"][0]["content"]
+    assert "num_speculative_tokens" not in content
+    assert "memory_bound" in content
+    assert "applicable_when" in content

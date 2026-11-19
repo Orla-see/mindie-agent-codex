@@ -25,7 +25,7 @@ seed = "assets/mindie-harness-seed.pyz"
 seed_lock = "assets/seed-lock.json"
 
 [tool.uv.sources]
-mindie-harness = { git = "https://github.com/mindie-agent/harness", rev = "14313b8ba58c888b20c9c216ec41d14f5e62f4f7" }
+mindie-harness = { git = "https://github.com/mindie-agent/harness", rev = "d23aa2f9c31cbe3bd7a029f7257e032c3cbfde46" }
 mindie-knowledge = { git = "https://github.com/mindie-agent/knowledge", rev = "9f48272a3ba87248bfda0e4068692511aac4dfa4" }
 remote-dev = { git = "https://github.com/mindie-agent/remote-dev", rev = "b33ca60baac81c237dd1bd6e7a8068945820727b" }
 mindie-diagnostics = { git = "https://github.com/mindie-agent/diagnostics", rev = "7464cbb4381e9dc996871d192eb3f05f61dfdb28" }
@@ -37,7 +37,7 @@ mindie-coordinator = { git = "https://github.com/mindie-agent/coordinator", rev 
 [tool.uv]
 # The reviewed plugin selection also replaces older transitive component pins.
 override-dependencies = [
-  "mindie-harness @ git+https://github.com/mindie-agent/harness@14313b8ba58c888b20c9c216ec41d14f5e62f4f7",
+  "mindie-harness @ git+https://github.com/mindie-agent/harness@d23aa2f9c31cbe3bd7a029f7257e032c3cbfde46",
   "mindie-knowledge @ git+https://github.com/mindie-agent/knowledge@9f48272a3ba87248bfda0e4068692511aac4dfa4",
   "remote-dev @ git+https://github.com/mindie-agent/remote-dev@b33ca60baac81c237dd1bd6e7a8068945820727b",
   "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@7464cbb4381e9dc996871d192eb3f05f61dfdb28",

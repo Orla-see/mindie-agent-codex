@@ -7,6 +7,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "plugins/mindie-agent/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import rsi_runtime_adapter  # noqa: E402
+import rsi_install  # noqa: E402
 
 
 def test_reference_adapter_never_uses_shell_and_parses_json(tmp_path):
@@ -46,17 +47,41 @@ def test_reference_adapter_missing_evidence_fails_closed(tmp_path):
     assert result["reason"] == "accuracy_command_not_configured"
 
 
+def test_implementation_provider_uses_configured_claude_command(tmp_path):
+    command = tmp_path / "claude_stub.py"
+    command.write_text(
+        "import json,sys\n"
+        "json.load(sys.stdin)\n"
+        "print(json.dumps({'result':'```diff\\n*** Begin Patch\\n*** Update File: vllm_ascend/example.py\\n@@\\n-old\\n+new\\n*** End Patch\\n```'}))\n",
+        encoding="utf-8",
+    )
+    result = rsi_runtime_adapter.dispatch(
+        "implement", tmp_path,
+        {"runtime_binding": {"implementation_provider": "claude-code",
+                             "implementation_providers": {
+                                 "claude-code": {"command": [sys.executable, str(command)]},
+                             }},
+         "candidate": {"candidate_id": "c1"}},
+    )
+    assert result["implementation_provider"] == "claude"
+    assert result["patch"].startswith("*** Begin Patch")
+
+
+def test_implementation_provider_detects_claude_without_codex(monkeypatch):
+    monkeypatch.setattr(rsi_runtime_adapter.shutil, "which",
+                        lambda name: "/usr/bin/claude" if name == "claude" else None)
+    command, provider = rsi_runtime_adapter._implementation_command({}, {}, None)
+    assert provider == "claude"
+    assert command == ["claude", "-p", "--output-format", "json", "--input-format", "text"]
+
+
 def test_reference_adapter_wrapper_round_trip(tmp_path):
     root = tmp_path
-    (root / "bin").mkdir()
-    (root / "config").mkdir()
-    source = SCRIPTS / "rsi_runtime_adapter.py"
-    (root / "bin/rsi_runtime_adapter.py").write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-    (root / "config/live-runtime-bindings.json").write_text(json.dumps({
-        "default": {"runtime_entry": "bin/rsi_runtime_adapter.py", "runtime_python": sys.executable},
-    }), encoding="utf-8")
-    wrapper = SCRIPTS / "rsi_entry.py"
-    (root / "bin/mindie_agent_rsi_entry.py").write_text(wrapper.read_text(encoding="utf-8"), encoding="utf-8")
+    rsi_install.install(root)
+    bindings = root / "config/live-runtime-bindings.json"
+    config = json.loads(bindings.read_text(encoding="utf-8"))
+    config["default"]["runtime_python"] = sys.executable
+    bindings.write_text(json.dumps(config), encoding="utf-8")
     process = subprocess.run(
         [sys.executable, str(root / "bin/mindie_agent_rsi_entry.py"), "prepare", "--root", str(root)],
         input=json.dumps({"candidate": {"candidate_id": "c1"}}),

@@ -43,6 +43,20 @@ def test_validate_normalizes_defaults_and_render_requires_lease():
     assert rendered_payload["defaults"]["profile_binding"]["tool"] == "msprof"
     assert rendered_payload["defaults"]["optimization_scope"]["parameters"]["num_speculative_tokens"] == "adaptive"
     assert rendered_payload["defaults"]["optimization_scope"]["strategy"] == "trend_bound"
+    assert rendered_payload["defaults"]["candidate_order"] == [
+        "runtime_parameters", "startup_features"
+    ]
+    assert rendered_payload["algorithm_exploration_authorized"] is False
+
+
+def test_source_implementation_requires_algorithm_exploration_authorization():
+    plan = base_plan()
+    plan["operations"] = ["prepare", "implement", "build"]
+    normalized = rsi_plan.validate(plan)
+    assert "implement" not in normalized["operations"]
+    plan["payload"]["allow_unimplemented_algorithms"] = True
+    normalized = rsi_plan.validate(plan)
+    assert normalized["operations"][:2] == ["prepare", "implement"]
 
 
 @pytest.mark.parametrize("field", ["source_root", "rsi_root"])
@@ -130,6 +144,8 @@ def test_cli_questions_returns_defaults_and_followups(tmp_path):
     body = json.loads(result.stdout)
     assert body["status"] == "needs_input"
     fields = {item["field"] for item in body["questions"]}
-    assert {"performance_policy", "accuracy_policy", "optimization_scope",
-            "speculative_method", "speculative_weights"} <= fields
+    assert fields == {"speculative_method", "speculative_weights"}
     assert body["defaults"]["profile_binding"]["tool"] == "msprof"
+    assert body["defaults"]["performance_policy"] == "default"
+    assert body["defaults"]["accuracy_policy"] == "default"
+    assert body["defaults"]["optimization_scope"]["strategy"] == "trend_bound"

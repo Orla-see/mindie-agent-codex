@@ -27,6 +27,8 @@ def test_install_creates_standard_wrapper_and_detects_nonstandard_runtime(tmp_pa
     assert wrapper.is_file()
     assert adapter.is_file()
     assert bindings.is_file()
+    assert (tmp_path / "bin/mindie_rsi/rsi_workload.py").is_file()
+    assert result["core_files_created"] > 0
 
     config = json.loads(bindings.read_text(encoding="utf-8"))
     config["default"]["runtime_python"] = sys.executable
