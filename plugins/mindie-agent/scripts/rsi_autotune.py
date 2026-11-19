@@ -30,6 +30,8 @@ try:
     from rsi_distill_queue import DistillQueue
     from rsi_proposals import propose
     from rsi_knowledge import research_request
+    from rsi_workload import build_manifest
+    from rsi_compare import compare as compare_objective
     from rsi_sealed_final import evaluate as evaluate_sealed_final
     from rsi_evidence import validate_paired, validate_profile, validate_teacher_forcing
 except ImportError:  # pragma: no cover - direct package execution fallback
@@ -40,6 +42,8 @@ except ImportError:  # pragma: no cover - direct package execution fallback
     from .rsi_distill_queue import DistillQueue
     from .rsi_proposals import propose
     from .rsi_knowledge import research_request
+    from .rsi_workload import build_manifest
+    from .rsi_compare import compare as compare_objective
     from .rsi_sealed_final import evaluate as evaluate_sealed_final
     from .rsi_evidence import validate_paired, validate_profile, validate_teacher_forcing
 
@@ -242,6 +246,7 @@ class AutotuneController:
         self.queue_path = self.state_dir / "autotune-queue.json"
         self.active_path = self.state_dir / "active-best.json"
         self.cost_model_path = self.state_dir / "cost-model.json"
+        self.workload_path = self.state_dir / "workload-manifest.json"
         self.memory_path = self.state_dir / "memory.jsonl"
         self.distill_path = self.state_dir / "knowledge-distill-queue.jsonl"
         self.memory = MemoryStore(self.memory_path)
@@ -272,6 +277,16 @@ class AutotuneController:
 
     def _prepare_metadata(self, state: dict[str, Any]) -> None:
         """Persist the cost-model and expose replayable memory to runners."""
+        startup_text = None
+        try:
+            startup_text = Path(self.plan.get("startup_script", "")).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            pass
+        manifest = build_manifest({**self.plan["payload"], "objective": self.plan["objective"],
+                                   "test_command": self.plan.get("test_command")},
+                                  startup_text=startup_text)
+        state["workload_manifest"] = manifest
+        _write(self.workload_path, manifest)
         report = plan_from_payload(self.plan["payload"])
         if report is not None:
             state["cost_model"] = report
@@ -296,6 +311,12 @@ class AutotuneController:
         if isinstance(old, dict) and isinstance(old.get("candidates"), list):
             return old
         candidate_payload = self.plan["payload"]
+        startup_parameters = (state.get("workload_manifest") or {}).get("startup_parameters", {})
+        if isinstance(startup_parameters, Mapping) and "num_speculative_tokens" in startup_parameters:
+            candidate_payload = {
+                **candidate_payload,
+                "current_num_speculative_tokens": startup_parameters["num_speculative_tokens"],
+            }
         if (candidate_payload.get("auto_propose") or candidate_payload.get("auto_research")
                 and candidate_payload.get("candidates") is None):
             candidate_payload = {
@@ -324,6 +345,7 @@ class AutotuneController:
                 "bindings": self.plan.get("bindings"), "candidate": dict(item),
                 "current_best": dict(state.get("best") or {}),
                 "cost_model": state.get("cost_model"),
+                "workload_manifest": state.get("workload_manifest"),
                 "memory_matches": state.get("memory_matches", []),
                 "controls": controls}
         payload["defaults"] = dict(self.plan.get("defaults") or {})
@@ -338,7 +360,10 @@ class AutotuneController:
         # adapters that do not inspect the nested controls object.
         for key in ("deployment", "implementation_cmd", "implement_cmd", "build_cmd", "profile_cmd", "token_forcing_cmd",
                     "benchmark_cmd", "teacher_forcing_scorer_cmd", "profile_paths", "msprof_paths",
-                    "token_forcing_rows", "candidate_token_ids", "stock_token_ids", "margin_delta", "timeout_s"):
+                    "token_forcing_rows", "candidate_token_ids", "stock_token_ids", "margin_delta",
+                    "workload_manifest", "warmup_runs", "repeats", "dataset", "dataset_revision",
+                    "prompt_ids", "batch_size", "concurrency", "max_new_tokens", "temperature", "top_p",
+                    "seed", "model_revision", "tokenizer_revision", "timeout_s"):
             if key in controls:
                 payload[key] = controls[key]
         return payload
@@ -358,6 +383,11 @@ class AutotuneController:
             for operation in self._operations():
                 receipt = self.runner.run(operation, payload)
                 receipts[operation] = dict(receipt.value)
+                if operation == "prepare" and isinstance(receipt.value.get("workload_snapshot"), Mapping):
+                    snapshot = dict(receipt.value["workload_snapshot"])
+                    manifest = dict(payload.get("workload_manifest") or {})
+                    manifest.update({key: value for key, value in snapshot.items() if value})
+                    payload["workload_manifest"] = manifest
                 if operation == "implement" and isinstance(receipt.value.get("source_root"), str):
                     payload["source_root"] = receipt.value["source_root"]
                     payload["candidate_source_root"] = receipt.value["source_root"]
@@ -378,6 +408,11 @@ class AutotuneController:
 
         accuracy = receipts.get("accuracy", {})
         performance = receipts.get("performance", {})
+        objective_comparison = None
+        if isinstance(performance, Mapping):
+            if performance.get("paired_runs") or performance.get("baseline_samples"):
+                objective_comparison = compare_objective(
+                    performance, self.plan["objective"], self.plan["payload"])
         profile_report = receipts.get("profile", {})
         cost_model = None
         profile_rows = profile_report.get("profile_observations") if isinstance(profile_report, Mapping) else None
@@ -431,6 +466,8 @@ class AutotuneController:
             if "paired_performance" in evidence:
                 gates["paired_evidence"] = evidence["paired_performance"]["passed"]
         lower_bound = _lower_bound(performance)
+        if objective_comparison and isinstance(objective_comparison.get("ci_lower_ratio"), (int, float)):
+            lower_bound = float(objective_comparison["ci_lower_ratio"])
         if sealed_report is not None and isinstance(
                 sealed_report.get("paired_speedup_ci_lower_bound"), (int, float)):
             lower_bound = float(sealed_report["paired_speedup_ci_lower_bound"])
@@ -438,9 +475,12 @@ class AutotuneController:
         passed = all(gates.get(name, False) for name in self.required_gates) and gates["paired_speed_ci"]
         result = {"status": "passed" if passed else "evaluated", "gates": gates,
                 "paired_speedup_ci_lower_bound": lower_bound, "receipts": receipts,
-                "candidate_id": item["candidate_id"]}
+                "candidate_id": item["candidate_id"],
+                "workload_manifest": payload.get("workload_manifest")}
         if cost_model is not None:
             result["cost_model"] = cost_model
+        if objective_comparison is not None:
+            result["objective_comparison"] = objective_comparison
         if evidence:
             result["evidence"] = evidence
         if sealed_report is not None:
@@ -505,6 +545,9 @@ class AutotuneController:
         for item in wave:
             cid = item["candidate_id"]
             result = results.get(cid, {"status": "failed", "reason": "missing_result"})
+            if isinstance(result.get("workload_manifest"), Mapping):
+                state["workload_manifest"] = dict(result["workload_manifest"])
+                _write(self.workload_path, state["workload_manifest"])
             if isinstance(result.get("cost_model"), Mapping):
                 state["cost_model"] = dict(result["cost_model"])
                 _write(self.cost_model_path, state["cost_model"])

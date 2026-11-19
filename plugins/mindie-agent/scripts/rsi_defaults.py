@@ -25,8 +25,8 @@ DEFAULT_OPTIMIZATION_SCOPE = {
     "parameters": {"num_speculative_tokens": "adaptive"},
     "strategy": "trend_bound",
     "seed": "from_startup_script",
-    "growth": "doubling_with_bracket_refinement",
-    "reason": "No optimization scope was specified; adaptively tune speculative token count until the measured trend reaches a bound.",
+    "growth": "bidirectional_step_two",
+    "reason": "No optimization scope was specified; probe K-2 and K+2, stop a direction at its first loss, and test K=0 only after sustained downward improvement.",
 }
 
 

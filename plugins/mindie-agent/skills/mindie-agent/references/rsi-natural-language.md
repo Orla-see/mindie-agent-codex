@@ -72,12 +72,14 @@ claim.
 
 If the user does not state an optimization scope, ask whether to use the
 default first pass. The default scope tunes
-`num_speculative_tokens` with an adaptive trend-bound strategy. The controller
-starts from the value in the startup script, probes wider values directly, and
-only refines a bracket around the best trend. It does not enumerate every
-integer. A sustained throughput plateau, regression, or high compute
-utilization with no throughput gain marks that direction as bound, so the
-controller stops increasing the parameter and moves to another candidate.
+`num_speculative_tokens` with a bidirectional trend-bound strategy. The
+controller parses the current value from the supplied startup script, tests adjacent values
+at a step of two on both sides, and stops a direction at its first measured
+loss. If the startup script cannot be parsed, the manifest records `K=5` with
+`num_speculative_tokens_source=default` and uses it as the search origin. A higher-K loss supported by high compute utilization stops the upward
+direction. A lower-K loss stops the downward direction. The controller tests
+`K=0` only when every measured positive K improved while moving downward, or
+when the user requests an autoregressive baseline.
 
 For a speculative-decoding request, ask two separate questions when they are
 not present: which method (`mtp`, `dflash`, `dflash2`, or `dspark`) and where
@@ -182,6 +184,16 @@ commands into the plugin:
 - `scripts/rsi_cost_model.py` consumes repeated profiler observations and
   writes `cost-model.json` with a conservative ceiling, acceptance statistics,
   stage fractions, confidence, evidence gaps, and the largest bottleneck.
+- `scripts/rsi_workload.py` turns the supplied test definition into a
+  privacy-safe workload manifest with objective metric, dataset and model
+  revisions, prompt selection, decoding settings, warmup/repeat policy, and
+  command hashes. Host paths and endpoint values are excluded from the
+  manifest snapshot.
+- `scripts/rsi_compare.py` compares paired candidate and baseline rows using
+  the user's objective. Throughput uses paired rate ratios, latency uses the
+  requested percentile, memory uses peak usage, and accepted-token objectives
+  use accepted tokens per verify step. Bootstrap confidence intervals are
+  applied to rate ratios when the objective supports them.
 - `scripts/rsi_proposals.py` turns that bottleneck into a bounded, deterministic
   shortlist when `payload.auto_propose` is enabled. It emits candidate data;
   build and deployment remain the binding-selected runtime's responsibility.

@@ -10,6 +10,7 @@ evidence into a pass.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -120,6 +121,22 @@ def _parse(stdout: str) -> dict[str, Any]:
     return {}
 
 
+def _file_sha256(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def _run(root: Path, operation: str, payload: Mapping[str, Any],
          binding: Mapping[str, Any], command: Any) -> dict[str, Any]:
     argv = _argv(command, f"{operation}_cmd")
@@ -161,6 +178,47 @@ def _run(root: Path, operation: str, payload: Mapping[str, Any],
     return result
 
 
+def _run_performance_protocol(root: Path, payload: Mapping[str, Any],
+                              binding: Mapping[str, Any], command: Any) -> dict[str, Any]:
+    manifest = payload.get("workload_manifest")
+    if not isinstance(manifest, Mapping):
+        return _run(root, "performance", payload, binding, command)
+    try:
+        warmups = max(0, int(manifest.get("warmup_runs", 1) or 0))
+        repeats = max(1, int(manifest.get("repeats", 1) or 1))
+    except (TypeError, ValueError):
+        return {"status": "failed", "passed": False, "reason": "invalid_workload_repeat_policy"}
+    for index in range(warmups):
+        warmup = _run(root, "performance", {**payload, "workload_phase": "warmup",
+                                              "run_index": index}, binding, command)
+        if warmup.get("status") in {"failed", "unknown", "infra_failed"} or warmup.get("passed") is False:
+            return {"status": "failed", "passed": False, "reason": "warmup_failed",
+                    "warmup": warmup, "run_index": index}
+    measured = []
+    for index in range(repeats):
+        result = _run(root, "performance", {**payload, "workload_phase": "measured",
+                                             "run_index": index}, binding, command)
+        if result.get("status") in {"failed", "unknown", "infra_failed"} or result.get("passed") is False:
+            return {"status": result.get("status", "failed"), "passed": False,
+                    "reason": "measured_run_failed", "runs": measured, "failed_run": result}
+        measured.append(result)
+    merged = dict(measured[-1])
+    merged["warmup_runs"] = warmups
+    merged["repeats"] = repeats
+    merged["runs"] = measured
+    for field in ("per_request", "paired_runs", "baseline_samples", "candidate_samples"):
+        rows = [row for result in measured for row in (result.get(field) or [])
+                if isinstance(row, Mapping)]
+        if field == "per_request":
+            from rsi_workload import request_record
+            rows = [request_record(row, run_index=index, phase="measured")
+                    for index, result in enumerate(measured)
+                    for row in (result.get(field) or []) if isinstance(row, Mapping)]
+        if rows:
+            merged[field] = rows
+    return merged
+
+
 def dispatch(operation: str, root: Path, payload: Mapping[str, Any]) -> dict[str, Any]:
     binding = _binding(payload)
     commands = _commands(binding, payload)
@@ -168,9 +226,33 @@ def dispatch(operation: str, root: Path, payload: Mapping[str, Any]) -> dict[str
         _argv(commands.get(name), name) for name in COMMAND_KEYS["prepare"]
     ):
         candidate = payload.get("candidate")
+        snapshot = {
+            "startup_sha256": _file_sha256(payload.get("startup_script")),
+            "test_script_sha256": _file_sha256(payload.get("test_script")),
+            "test_config_sha256": _file_sha256(payload.get("test_config")),
+        }
+        startup_path = payload.get("startup_script")
+        startup_value = None
+        startup_source = "default"
+        from rsi_workload import DEFAULT_SPECULATIVE_LENGTH, discover_startup_parameter
+        if isinstance(startup_path, str) and Path(startup_path).is_file():
+            try:
+                startup_text = Path(startup_path).read_text(encoding="utf-8")
+                value = discover_startup_parameter(startup_text)
+                if value is not None:
+                    startup_value = value
+                    startup_source = "startup_script"
+            except (OSError, UnicodeDecodeError):
+                pass
+        snapshot["startup_parameters"] = {
+            "num_speculative_tokens": (startup_value if startup_value is not None
+                                        else DEFAULT_SPECULATIVE_LENGTH),
+            "num_speculative_tokens_source": startup_source,
+        }
         return {"status": "prepared", "passed": True,
                 "candidate_id": candidate.get("candidate_id") if isinstance(candidate, Mapping) else None,
-                "deployment": payload.get("deployment") or binding.get("deployment") or {}}
+                "deployment": payload.get("deployment") or binding.get("deployment") or {},
+                "workload_snapshot": snapshot}
     if operation in {"status", "report"} and not any(
         _argv(commands.get(name), name) for name in COMMAND_KEYS.get(operation, ())
     ):
@@ -216,7 +298,8 @@ def dispatch(operation: str, root: Path, payload: Mapping[str, Any]) -> dict[str
         else:
             return {"status": "needs_input", "passed": False,
                     "reason": "codex_not_available_and_implementation_cmd_not_configured"}
-    result = _run(root, operation, payload, binding, command)
+    result = (_run_performance_protocol(root, payload, binding, command)
+              if operation == "performance" else _run(root, operation, payload, binding, command))
     if operation == "profile" and result.get("status") not in {"failed", "unknown", "infra_failed"}:
         paths = result.get("profile_paths") or result.get("msprof_paths") or payload.get("profile_paths")
         if isinstance(paths, (list, tuple)):

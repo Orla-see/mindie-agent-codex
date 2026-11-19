@@ -42,10 +42,16 @@ def propose(payload: Mapping[str, Any], cost_report: Mapping[str, Any] | None = 
     rows = payload.get("profile_observations")
     if isinstance(scope, Mapping) and scope.get("strategy") == "trend_bound":
         parameter = str(next(iter((scope.get("parameters") or {"num_speculative_tokens": "adaptive"}))))
-        trend = assess_bound(rows if isinstance(rows, list) else [], parameter)
+        origin = scope.get("current_value")
+        if origin is None:
+            origin = payload.get(f"current_{parameter}") or payload.get(parameter)
+        trend = assess_bound(rows if isinstance(rows, list) else [], parameter,
+                             origin=int(origin) if isinstance(origin, (int, float)) else None,
+                             step=2)
         return [{
             "method": "adaptive-runtime-parameter",
-            "config": {parameter: "probe_from_startup", "search": "trend_bound"},
+            "config": {parameter: "probe_adjacent_by_two", "search": "directional_trend_bound",
+                       "next_values": trend.get("next_values", [])},
             "hypothesis": f"expand_{parameter}_until_bound",
             "trend": trend,
             "stop_when": "compute_bound_or_throughput_plateau_or_regression",

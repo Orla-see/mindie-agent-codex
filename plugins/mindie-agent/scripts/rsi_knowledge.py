@@ -426,4 +426,3 @@ def refresh_policy(payload: Mapping[str, Any], *, now: float | None = None) -> d
             "refresh_due": current >= float(last) + interval,
             "source_types": list(value.get("source_types") or ["configured_feed", "repository", "academic_paper"]),
             "auto_distill": "verified_sources_only"}
-

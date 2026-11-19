@@ -92,7 +92,10 @@ def validate_paired(receipt: Mapping[str, Any], *, min_runs: int = 5) -> dict[st
         speedup = _number(row, ("speedup", "paired_speedup"))
         baseline = _number(row, ("baseline_time_s", "baseline_latency_s", "baseline_elapsed_s"))
         candidate = _number(row, ("candidate_time_s", "candidate_latency_s", "candidate_elapsed_s"))
-        if speedup is not None or (baseline is not None and candidate is not None and candidate > 0):
+        baseline_rate = _number(row, ("baseline_output_tok_s", "baseline_throughput", "baseline_tokens_per_s"))
+        candidate_rate = _number(row, ("candidate_output_tok_s", "candidate_throughput", "candidate_tokens_per_s"))
+        if speedup is not None or (baseline is not None and candidate is not None and candidate > 0) \
+                or (baseline_rate is not None and candidate_rate is not None and candidate_rate > 0):
             valid += 1
     passed = valid >= max(1, int(min_runs))
     return {
