@@ -8,14 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-try:
-    from rsi_knowledge import refresh_policy
-except ImportError:  # pragma: no cover - direct package execution fallback
-    from .rsi_knowledge import refresh_policy
-
 SPECULATIVE_METHODS = ("mtp", "dflash", "dflash2", "dspark")
 DEFAULT_CANDIDATE_ORDER = ("runtime_parameters", "startup_features")
-ALGORITHM_EXPLORATION_POLICIES = ("disabled", "user_authorized")
 DEFAULT_PROFILE_BINDING = {
     "tool": "msprof",
     "command": ["msprof"],
@@ -42,17 +36,9 @@ def default_settings(payload: Mapping[str, Any]) -> dict[str, Any]:
     scope = value.get("optimization_scope")
     if not isinstance(scope, Mapping):
         scope = DEFAULT_OPTIMIZATION_SCOPE
-    authorized = algorithm_exploration_allowed(value)
     candidate_order = value.get("candidate_order")
     if not isinstance(candidate_order, list):
         candidate_order = list(DEFAULT_CANDIDATE_ORDER)
-        if authorized:
-            candidate_order.append("source_changes")
-    policy = str(value.get("algorithm_exploration_policy") or
-                 ("user_authorized" if authorized else "disabled"))
-    sources = ["repository", "configured_feed"]
-    if authorized:
-        sources.insert(1, "academic_paper")
     return {
         "profile_binding": profile,
         "performance_policy": str(value.get("performance_policy") or "default"),
@@ -62,37 +48,17 @@ def default_settings(payload: Mapping[str, Any]) -> dict[str, Any]:
         "speculative_methods": list(SPECULATIVE_METHODS),
         "runtime_parameter_policy": str(value.get("runtime_parameter_policy") or "discover_from_startup"),
         "startup_feature_policy": str(value.get("startup_feature_policy") or "allow_existing_features"),
-        "source_change_policy": str(value.get("source_change_policy") or "parameters_only"),
+        "source_change_policy": "parameters_only",
         "source_scope_policy": str(value.get("source_scope_policy") or "vllm_ascend_only"),
-        "algorithm_exploration_policy": policy,
-        "algorithm_exploration_authorized": authorized,
+        "algorithm_exploration_policy": "disabled",
+        "algorithm_exploration_authorized": False,
         "candidate_order": candidate_order,
-        "implementation_provider": str(value.get("implementation_provider") or "auto"),
-        "auto_distill": bool(value.get("auto_distill", True)),
-        "knowledge_timeout_s": int(value.get("knowledge_timeout_s") or 600),
-        "knowledge": {
-            "candidate_mode": ("top6_with_algorithm_exploration" if authorized
-                               else "top6_existing_capabilities"),
-            "refresh": refresh_policy(value),
-            "sources": sources,
-            "distill_policy": "verified_sources_only",
-        },
     }
 
 
 def algorithm_exploration_allowed(payload: Mapping[str, Any]) -> bool:
-    """Return whether the user explicitly enabled algorithms absent from the repo."""
-    if payload.get("allow_unimplemented_algorithms") is True:
-        return True
-    if payload.get("allow_algorithm_exploration") is True:
-        return True
-    policy = str(payload.get("algorithm_exploration_policy") or "").strip().lower()
-    if policy in ALGORITHM_EXPLORATION_POLICIES:
-        return policy == "user_authorized"
-    if policy:
-        return False
-    # Backward-compatible explicit authorization used by earlier plans.
-    return payload.get("source_change_policy") == "allow_source_changes"
+    """Source/algorithm exploration is intentionally outside this runtime."""
+    return False
 
 
 def questions(payload: Mapping[str, Any]) -> list[dict[str, Any]]:

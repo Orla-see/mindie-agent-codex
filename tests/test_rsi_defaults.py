@@ -25,19 +25,9 @@ def test_default_settings_fill_policy_values():
     assert defaults["runtime_parameter_policy"] == "discover_from_startup"
     assert defaults["startup_feature_policy"] == "allow_existing_features"
     assert defaults["source_change_policy"] == "parameters_only"
-    assert defaults["implementation_provider"] == "auto"
     assert defaults["algorithm_exploration_policy"] == "disabled"
     assert defaults["algorithm_exploration_authorized"] is False
     assert defaults["candidate_order"] == ["runtime_parameters", "startup_features"]
-
-
-def test_algorithm_exploration_requires_explicit_authorization():
-    defaults = rsi_defaults.default_settings({"allow_unimplemented_algorithms": True})
-    assert defaults["algorithm_exploration_authorized"] is True
-    assert defaults["candidate_order"] == [
-        "runtime_parameters", "startup_features", "source_changes"
-    ]
-    assert "academic_paper" in defaults["knowledge"]["sources"]
 
 
 def test_speculative_request_asks_for_method_and_weights():

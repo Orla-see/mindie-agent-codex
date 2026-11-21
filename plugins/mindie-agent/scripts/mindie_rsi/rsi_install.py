@@ -91,7 +91,6 @@ def install(root: str | Path, *, bindings: str | Path | None = None,
             "default": {
                 "runtime_entry": selected,
                 "runtime_python": sys.executable if os.name == "nt" else "python3",
-                "implementation_provider": "auto",
                 "commands": {},
                 "profile_binding": {
                     "tool": "msprof",

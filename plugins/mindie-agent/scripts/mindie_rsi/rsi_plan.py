@@ -18,14 +18,14 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from rsi_defaults import algorithm_exploration_allowed, default_settings, questions
+    from rsi_defaults import default_settings, questions
 except ImportError:  # pragma: no cover - direct package execution fallback
-    from .rsi_defaults import algorithm_exploration_allowed, default_settings, questions
+    from .rsi_defaults import default_settings, questions
 
 SCHEMA = "mindie-agent/rsi-plan/v1"
 OPERATIONS = (
-    "doctor", "status", "prepare", "implement", "build", "profile", "accuracy",
-    "performance", "run", "resume", "report", "knowledge", "record",
+    "doctor", "status", "prepare", "build", "profile", "accuracy",
+    "performance", "run", "resume", "report", "record",
     "cleanup",
 )
 _TASK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
@@ -151,21 +151,14 @@ def validate(plan: Any) -> dict[str, Any]:
     payload.setdefault("optimization_scope", defaults["optimization_scope"])
     payload.setdefault("algorithm_exploration_policy", defaults["algorithm_exploration_policy"])
     payload.setdefault("source_change_policy", defaults["source_change_policy"])
-    authorized_algorithm_exploration = algorithm_exploration_allowed(payload)
-    payload["algorithm_exploration_authorized"] = authorized_algorithm_exploration
+    payload["algorithm_exploration_authorized"] = False
     candidate_order = payload.get("candidate_order", defaults["candidate_order"])
     if not isinstance(candidate_order, list):
         candidate_order = list(defaults["candidate_order"])
-    if not authorized_algorithm_exploration:
-        candidate_order = [item for item in candidate_order if item != "source_changes"]
-        if not candidate_order:
-            candidate_order = ["runtime_parameters", "startup_features"]
+    candidate_order = [item for item in candidate_order if item != "source_changes"]
+    if not candidate_order:
+        candidate_order = ["runtime_parameters", "startup_features"]
     payload["candidate_order"] = candidate_order
-    if authorized_algorithm_exploration:
-        if "implement" not in operations:
-            operations = ["prepare", "implement", *[op for op in operations if op != "prepare"]]
-    elif "implement" in operations:
-        operations = [op for op in operations if op != "implement"]
 
     normalized = {
         "schema": SCHEMA,
@@ -246,8 +239,6 @@ def render(plan: Any) -> dict[str, Any]:
             "benchmark_passed": "performance" in normalized["operations"],
             "correctness_passed": "accuracy" in normalized["operations"],
             "teacher_forced": bool(normalized["payload"].get("teacher_forced", False)),
-            "sealed_final": bool(normalized["payload"].get("sealed_final", False)),
-            "paper_ready": bool(normalized["payload"].get("paper_ready", False)),
         },
     }
 

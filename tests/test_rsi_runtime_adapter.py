@@ -47,34 +47,6 @@ def test_reference_adapter_missing_evidence_fails_closed(tmp_path):
     assert result["reason"] == "accuracy_command_not_configured"
 
 
-def test_implementation_provider_uses_configured_claude_command(tmp_path):
-    command = tmp_path / "claude_stub.py"
-    command.write_text(
-        "import json,sys\n"
-        "json.load(sys.stdin)\n"
-        "print(json.dumps({'result':'```diff\\n*** Begin Patch\\n*** Update File: vllm_ascend/example.py\\n@@\\n-old\\n+new\\n*** End Patch\\n```'}))\n",
-        encoding="utf-8",
-    )
-    result = rsi_runtime_adapter.dispatch(
-        "implement", tmp_path,
-        {"runtime_binding": {"implementation_provider": "claude-code",
-                             "implementation_providers": {
-                                 "claude-code": {"command": [sys.executable, str(command)]},
-                             }},
-         "candidate": {"candidate_id": "c1"}},
-    )
-    assert result["implementation_provider"] == "claude"
-    assert result["patch"].startswith("*** Begin Patch")
-
-
-def test_implementation_provider_detects_claude_without_codex(monkeypatch):
-    monkeypatch.setattr(rsi_runtime_adapter.shutil, "which",
-                        lambda name: "/usr/bin/claude" if name == "claude" else None)
-    command, provider = rsi_runtime_adapter._implementation_command({}, {}, None)
-    assert provider == "claude"
-    assert command == ["claude", "-p", "--output-format", "json", "--input-format", "text"]
-
-
 def test_reference_adapter_wrapper_round_trip(tmp_path):
     root = tmp_path
     rsi_install.install(root)

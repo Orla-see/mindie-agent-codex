@@ -26,33 +26,22 @@ try:
     from rsi_plan import SCHEMA, PlanError, validate
     from rsi_install import install as install_rsi_entry
     from rsi_cost_model import plan_from_payload
-    from rsi_memory import MemoryStore, distill_request
-    from rsi_distill_queue import DistillQueue
-    from rsi_proposals import propose
-    from rsi_knowledge import research_request
     from rsi_workload import DEFAULT_MEASURED_REPEATS, build_manifest
     from rsi_compare import compare as compare_objective
-    from rsi_sealed_final import evaluate as evaluate_sealed_final
     from rsi_evidence import validate_paired, validate_profile, validate_teacher_forcing
 except ImportError:  # pragma: no cover - direct package execution fallback
     from .rsi_plan import SCHEMA, PlanError, validate
     from .rsi_install import install as install_rsi_entry
     from .rsi_cost_model import plan_from_payload
-    from .rsi_memory import MemoryStore, distill_request
-    from .rsi_distill_queue import DistillQueue
-    from .rsi_proposals import propose
-    from .rsi_knowledge import research_request
     from .rsi_workload import DEFAULT_MEASURED_REPEATS, build_manifest
     from .rsi_compare import compare as compare_objective
-    from .rsi_sealed_final import evaluate as evaluate_sealed_final
     from .rsi_evidence import validate_paired, validate_profile, validate_teacher_forcing
 
 
 STATE_SCHEMA = "mindie-agent/rsi-autotune-state/v1"
 UNKNOWN_EXTERNAL = {"unknown", "running", "submitted", "pending", "inflight"}
 DEFAULT_REQUIRED_GATES = (
-    "benchmark_passed", "correctness_passed", "teacher_forced",
-    "paper_ready", "sealed_final",
+    "benchmark_passed", "correctness_passed",
 )
 
 
@@ -247,23 +236,6 @@ class AutotuneController:
         self.active_path = self.state_dir / "active-best.json"
         self.cost_model_path = self.state_dir / "cost-model.json"
         self.workload_path = self.state_dir / "workload-manifest.json"
-        self.memory_path = self.state_dir / "memory.jsonl"
-        self.distill_path = self.state_dir / "knowledge-distill-queue.jsonl"
-        self.memory = MemoryStore(self.memory_path)
-        self.distill_queue = DistillQueue(self.distill_path)
-
-    def _queue_distill(self, entry: Mapping[str, Any]) -> None:
-        request = distill_request(entry, deployment_signature=self._deployment_signature())
-        self.distill_queue.enqueue(request)
-        controls = self.plan.get("payload", {})
-        defaults = self.plan.get("defaults") or {}
-        if controls.get("auto_distill", defaults.get("auto_distill", False)) is True:
-            command = controls.get("knowledge_distill_cmd")
-            command = list(command) if isinstance(command, (list, tuple)) else None
-            self.distill_queue.flush(command, cwd=controls.get("knowledge_cwd"),
-                                     timeout_s=int(controls.get("knowledge_timeout_s", 600)),
-                                     domain=controls.get("knowledge_domain"))
-
     def _deployment_signature(self) -> str:
         endpoint = self.plan["endpoint"]
         value = {"host": endpoint["host"], "port": endpoint["port"],
@@ -293,7 +265,6 @@ class AutotuneController:
             cached = _read(self.cost_model_path, None)
             if isinstance(cached, dict):
                 state["cost_model"] = cached
-        state["memory_matches"] = self.memory.find(self._deployment_signature())
 
     def _load_state(self) -> dict[str, Any]:
         value = _read(self.state_path, {})
@@ -317,13 +288,6 @@ class AutotuneController:
                 **candidate_payload,
                 "current_num_speculative_tokens": startup_parameters["num_speculative_tokens"],
             }
-        if (candidate_payload.get("auto_propose") or candidate_payload.get("auto_research")
-                and candidate_payload.get("candidates") is None):
-            candidate_payload = {
-                **candidate_payload,
-                "candidates": propose(candidate_payload, state.get("cost_model"),
-                                      state.get("memory_matches", ())),
-            }
         candidates = expand_candidates(candidate_payload,
                                        limit=int(self.plan["payload"].get("max_candidates", 256)))
         queue = {"schema": "mindie-agent/rsi-autotune-queue/v1",
@@ -346,19 +310,13 @@ class AutotuneController:
                 "current_best": dict(state.get("best") or {}),
                 "cost_model": state.get("cost_model"),
                 "workload_manifest": state.get("workload_manifest"),
-                "memory_matches": state.get("memory_matches", []),
                 "controls": controls}
         payload["defaults"] = dict(self.plan.get("defaults") or {})
-        knowledge_defaults = payload["defaults"].get("knowledge")
-        if isinstance(knowledge_defaults, Mapping):
-            payload["knowledge"] = dict(knowledge_defaults)
-        if controls.get("auto_research") or controls.get("knowledge_search"):
-            payload["research_request"] = research_request(controls)
         # Runtime adapters receive a stable top-level action payload.  Keep the
         # complete plan under ``controls`` for auditability, while forwarding
         # the concrete deployment and command bindings needed by legacy
         # adapters that do not inspect the nested controls object.
-        for key in ("deployment", "implementation_provider", "implementation_providers", "implementation_cmd", "implement_cmd", "build_cmd", "profile_cmd", "token_forcing_cmd",
+        for key in ("deployment", "build_cmd", "profile_cmd", "token_forcing_cmd",
                     "benchmark_cmd", "teacher_forcing_scorer_cmd", "profile_paths", "msprof_paths",
                     "token_forcing_rows", "candidate_token_ids", "stock_token_ids", "margin_delta",
                     "workload_manifest", "warmup_runs", "repeats", "dataset", "dataset_revision",
@@ -369,7 +327,7 @@ class AutotuneController:
         return payload
 
     def _operations(self) -> list[str]:
-        ordered = ("prepare", "implement", "build", "profile", "accuracy", "performance")
+        ordered = ("prepare", "build", "profile", "accuracy", "performance")
         return [operation for operation in ordered if operation in self.plan["operations"]]
 
     def _evaluate(self, item: Mapping[str, Any], state: Mapping[str, Any]) -> dict[str, Any]:
@@ -388,9 +346,6 @@ class AutotuneController:
                     manifest = dict(payload.get("workload_manifest") or {})
                     manifest.update({key: value for key, value in snapshot.items() if value})
                     payload["workload_manifest"] = manifest
-                if operation == "implement" and isinstance(receipt.value.get("source_root"), str):
-                    payload["source_root"] = receipt.value["source_root"]
-                    payload["candidate_source_root"] = receipt.value["source_root"]
                 status = _status(receipt.value)
                 if status in UNKNOWN_EXTERNAL:
                     raise UnknownExternalEffect(f"{operation} returned {status}")
@@ -421,11 +376,7 @@ class AutotuneController:
             model_payload["profile_observations"] = profile_rows
             model_payload["profile"] = profile_report
             cost_model = plan_from_payload(model_payload)
-        strict_evidence = bool(
-            self.plan["payload"].get("strict_evidence")
-            or self.plan["payload"].get("paper_ready")
-            or self.plan["payload"].get("sealed_final")
-        )
+        strict_evidence = bool(self.plan["payload"].get("strict_evidence"))
         evidence: dict[str, Any] = {}
         if strict_evidence:
             if "profile" in self._operations():
@@ -443,20 +394,10 @@ class AutotuneController:
                     performance,
                     min_runs=int(self.plan["payload"].get("min_paired_runs", 5)),
                 )
-        sealed_report: Mapping[str, Any] | None = None
-        sealed_input = (item.get("sealed_final_payload")
-                        or self.plan["payload"].get("sealed_final_payload")
-                        or performance.get("sealed_final_payload"))
-        if isinstance(sealed_input, Mapping):
-            sealed_report = evaluate_sealed_final(sealed_input)
         gates: dict[str, bool] = {
             "benchmark_passed": _passed(performance, "benchmark_passed", "passed") is True,
             "correctness_passed": _passed(accuracy, "correctness_passed", "passed") is True,
             "teacher_forced": _passed(accuracy, "teacher_forced") is True,
-            "paper_ready": _passed(accuracy, "paper_ready") is True,
-            "sealed_final": (bool(sealed_report.get("passed")) if sealed_report is not None
-                              else (_passed(performance, "sealed_final") is True
-                                    or _passed(accuracy, "sealed_final") is True)),
         }
         if strict_evidence:
             if "profile" in evidence:
@@ -468,9 +409,6 @@ class AutotuneController:
         lower_bound = _lower_bound(performance)
         if objective_comparison and isinstance(objective_comparison.get("ci_lower_ratio"), (int, float)):
             lower_bound = float(objective_comparison["ci_lower_ratio"])
-        if sealed_report is not None and isinstance(
-                sealed_report.get("paired_speedup_ci_lower_bound"), (int, float)):
-            lower_bound = float(sealed_report["paired_speedup_ci_lower_bound"])
         gates["paired_speed_ci"] = lower_bound is not None and lower_bound > self.min_speedup
         measured_repeats = performance.get("repeats") if isinstance(performance, Mapping) else None
         if not isinstance(measured_repeats, int):
@@ -489,8 +427,6 @@ class AutotuneController:
             result["objective_comparison"] = objective_comparison
         if evidence:
             result["evidence"] = evidence
-        if sealed_report is not None:
-            result["sealed_final_report"] = dict(sealed_report)
         return result
 
     def _cleanup(self, payload: Mapping[str, Any], receipts: Mapping[str, Any]) -> None:
@@ -576,54 +512,6 @@ class AutotuneController:
                 best = {"candidate_id": cid, "method": item.get("method"),
                         "speedup": candidate_speedup, "binding": item.get("binding") or item.get("runtime_binding") or {},
                         "round": state["round"], "updated_unix": time.time()}
-                workload = result.get("workload_manifest")
-                workload = workload if isinstance(workload, Mapping) else {}
-                cost_model = result.get("cost_model")
-                cost_model = cost_model if isinstance(cost_model, Mapping) else {}
-                memory_entry = {
-                    "deployment_signature": self._deployment_signature(),
-                    "candidate_id": cid,
-                    "mechanism": str(item.get("method") or "candidate"),
-                    "mechanism_family": item.get("mechanism_family") or item.get("family") or "unknown",
-                    "outcome": "verified",
-                    "code_delta": item.get("patch") or item.get("patch_ref"),
-                    "requirements": item.get("requirements") or {},
-                    "correctness_contract": {"gates": result.get("gates", {})},
-                    "performance_evidence": {
-                        "paired_speedup_ci_lower_bound": candidate_speedup,
-                        "receipts": result.get("receipts", {}),
-                    },
-                    "applicability": {
-                        "objective": self.plan["objective"],
-                        "feature": str(item.get("method") or "candidate"),
-                        "bottleneck": cost_model.get("bottleneck"),
-                        "workload": {
-                            key: workload.get(key)
-                            for key in ("batch_size", "concurrency", "input_tokens", "max_new_tokens",
-                                        "dataset", "model_revision")
-                            if workload.get(key) is not None
-                        },
-                        "hardware": {"device_count": len(self.plan.get("devices") or [])},
-                    },
-                    "limits": result.get("sealed_final_report", {}).get("failure_reasons", []),
-                }
-                self.memory.append(memory_entry)
-                self._queue_distill(memory_entry)
-            else:
-                memory_entry = {
-                    "deployment_signature": self._deployment_signature(),
-                    "candidate_id": cid,
-                    "mechanism": str(item.get("method") or "candidate"),
-                    "mechanism_family": item.get("mechanism_family") or item.get("family") or "unknown",
-                    "outcome": str(result.get("reason") or result.get("status") or "failed"),
-                    "requirements": item.get("requirements") or {},
-                    "correctness_contract": {"gates": result.get("gates", {})},
-                    "performance_evidence": {"receipts": result.get("receipts", {})},
-                    "applicability": {"objective": self.plan["objective"],
-                                      "devices": self.plan["devices"]},
-                    "limits": result.get("sealed_final_report", {}).get("failure_reasons", []),
-                }
-                self.memory.append(memory_entry)
         state["best"] = best
         state["active_candidate"] = None
         state["status"] = "idle" if not any(x.get("status") == "unknown" for x in results.values()) else "needs_reconcile"

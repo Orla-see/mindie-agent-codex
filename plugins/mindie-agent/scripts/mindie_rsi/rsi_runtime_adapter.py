@@ -15,7 +15,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import time
@@ -26,18 +25,11 @@ COMMAND_KEYS = {
     "doctor": ("doctor_cmd",),
     "status": ("status_cmd",),
     "prepare": ("prepare_cmd",),
-    "implement": ("implementation_cmd", "implement_cmd"),
     "build": ("build_cmd",),
     "profile": ("profile_cmd", "profiler_cmd"),
     "accuracy": ("teacher_forcing_scorer_cmd", "token_forcing_cmd", "accuracy_cmd"),
     "performance": ("benchmark_cmd", "performance_cmd"),
     "cleanup": ("cleanup_cmd",),
-}
-IMPLEMENTATION_PROVIDER_ALIASES = {
-    "codex": "codex",
-    "openai-codex": "codex",
-    "claude": "claude",
-    "claude-code": "claude",
 }
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
@@ -125,80 +117,6 @@ def _parse(stdout: str) -> dict[str, Any]:
         if isinstance(value, dict):
             return dict(value)
     return {}
-
-
-def _implementation_provider(binding: Mapping[str, Any],
-                             payload: Mapping[str, Any]) -> tuple[str | None, Mapping[str, Any]]:
-    value = next((source.get("implementation_provider") for source in (payload, binding)
-                  if isinstance(source.get("implementation_provider"), str)
-                  and source.get("implementation_provider").strip()), None)
-    if isinstance(value, str):
-        if value.strip().lower() in {"auto", "automatic"}:
-            return None, {}
-        for source in (payload, binding):
-            providers = source.get("implementation_providers")
-            if isinstance(providers, Mapping) and isinstance(providers.get(value), Mapping):
-                return IMPLEMENTATION_PROVIDER_ALIASES.get(value.lower(), value), providers[value]
-        return IMPLEMENTATION_PROVIDER_ALIASES.get(value.lower(), value), {}
-    for source in (payload, binding):
-        providers = source.get("implementation_providers") if isinstance(source, Mapping) else None
-        if isinstance(providers, Mapping):
-            for name, spec in providers.items():
-                if isinstance(name, str) and isinstance(spec, Mapping):
-                    return IMPLEMENTATION_PROVIDER_ALIASES.get(name.lower(), name), spec
-    return None, {}
-
-
-def _implementation_command(binding: Mapping[str, Any], payload: Mapping[str, Any],
-                            explicit: Any) -> tuple[Any, str | None]:
-    if explicit is not None:
-        provider, _ = _implementation_provider(binding, payload)
-        return explicit, provider
-    provider, spec = _implementation_provider(binding, payload)
-    configured = spec.get("command") or spec.get("argv")
-    if configured is not None:
-        return configured, provider
-    candidates = [provider] if provider else ["codex", "claude"]
-    for name in candidates:
-        normalized = IMPLEMENTATION_PROVIDER_ALIASES.get(str(name).lower(), str(name))
-        if normalized == "codex" and shutil.which("codex"):
-            return ["codex", "exec", "--full-auto"], normalized
-        if normalized == "claude" and shutil.which("claude"):
-            return ["claude", "-p", "--output-format", "json", "--input-format", "text"], normalized
-    return None, provider
-
-
-def _patch_text(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    text = value.strip()
-    if "```" in text:
-        blocks = re.findall(r"```(?:diff|patch)?\s*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
-        text = next((block.strip() for block in blocks if "diff --git" in block or "*** Begin Patch" in block), text)
-    for marker in ("diff --git ", "*** Begin Patch"):
-        index = text.find(marker)
-        if index >= 0:
-            return text[index:].strip()
-    if text.startswith("--- ") and "+++ " in text:
-        return text
-    return None
-
-
-def _normalize_implementation_result(result: dict[str, Any]) -> dict[str, Any]:
-    if isinstance(result.get("patch"), str) and result["patch"].strip():
-        return result
-    values: list[Any] = [result.get("result"), result.get("text"), result.get("stdout")]
-    content = result.get("content")
-    if isinstance(content, list):
-        values.extend(item.get("text") for item in content if isinstance(item, Mapping))
-    for value in values:
-        patch = _patch_text(value)
-        if patch:
-            result["patch"] = patch
-            result.setdefault("status", "completed")
-            result.setdefault("passed", True)
-            return result
-    return result
 
 
 def _file_sha256(value: Any) -> str | None:
@@ -398,44 +316,10 @@ def dispatch(operation: str, root: Path, payload: Mapping[str, Any]) -> dict[str
                 from rsi_profiler_ascend import parse
             report = parse(paths)
             return _normalize_profile({"status": "completed", "passed": bool(paths), **report}, payload)
-    provider = None
-    if operation == "implement":
-        command, provider = _implementation_command(binding, payload, command)
-        if command is None:
-            return {"status": "needs_input", "passed": False,
-                    "reason": "implementation_provider_not_available_and_command_not_configured",
-                    "available_providers": ["codex", "claude"]}
     result = (_run_performance_protocol(root, payload, binding, command)
               if operation == "performance" else _run(root, operation, payload, binding, command))
     if operation == "profile":
         result = _normalize_profile(result, payload)
-    if operation == "implement":
-        result = _normalize_implementation_result(result)
-        if provider:
-            result["implementation_provider"] = provider
-    if operation == "implement" and result.get("status") in {"completed", "promoted"}:
-        patch = result.get("patch")
-        source = payload.get("source_root")
-        candidate = payload.get("candidate")
-        candidate_id = candidate.get("candidate_id") if isinstance(candidate, Mapping) else "candidate"
-        if patch and isinstance(source, str):
-            try:
-                try:
-                    from .rsi_workspace import ResearchWorkspace
-                except ImportError:
-                    from rsi_workspace import ResearchWorkspace
-                workspace = ResearchWorkspace(source, str(candidate_id))
-                workspace_path = workspace.apply_patch(str(patch))
-                result["workspace"] = str(workspace_path)
-                result["source_root"] = str(workspace_path)
-            except Exception as exc:
-                return {"status": "failed", "passed": False,
-                        "reason": f"implementation_patch_failed:{type(exc).__name__}",
-                        "error": str(exc)[:500]}
-        elif not patch:
-            result.setdefault("status", "unavailable")
-            result.setdefault("passed", False)
-            result.setdefault("reason", "implementation_patch_missing")
     return result
 
 

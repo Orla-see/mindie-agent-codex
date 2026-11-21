@@ -49,12 +49,12 @@ class ScriptedRunner:
         if operation == "accuracy":
             return rsi_autotune.ActionReceipt(operation, {
                 "status": "completed", "passed": True, "correctness_passed": True,
-                "teacher_forced": True, "paper_ready": True,
+                "teacher_forced": True,
             })
         if operation == "performance":
             return rsi_autotune.ActionReceipt(operation, {
                 "status": "completed", "passed": True,
-                "benchmark_passed": True, "sealed_final": True,
+                "benchmark_passed": True,
                 "repeats": 3,
                 "paired_speedup_ci_lower_bound": self.speedup,
             })
@@ -160,50 +160,3 @@ def test_cli_explicit_round_budget_keeps_running_after_target(tmp_path, monkeypa
     ]) == 0
     assert FakeController.calls == 3
     assert json.loads(capsys.readouterr().out.splitlines()[-1])["best"]["candidate_id"] == "c3"
-
-
-def test_auto_proposer_persists_cost_model_and_memory(tmp_path):
-    value = plan(tmp_path)
-    value["payload"] = {
-        "auto_propose": True,
-        "max_candidates": 1,
-        "profile_observations": [{
-            "elapsed_ms": 1000, "completion_tokens": 100,
-            "baseline_elapsed_ms": 1200, "baseline_tokens": 100,
-            "verify_ms": 700,
-        }],
-    }
-    runner = ScriptedRunner()
-    controller = rsi_autotune.AutotuneController(value, runner, tmp_path / "state")
-    result = controller.run_once()
-    assert result["best"]["candidate_id"] != "baseline-control"
-    assert json.loads((tmp_path / "state" / "cost-model.json").read_text())["largest_gap"] == "verify"
-    assert json.loads((tmp_path / "state" / "memory.jsonl").read_text())["candidate_id"] == result["best"]["candidate_id"]
-
-
-def test_sealed_final_payload_overrides_asserted_runtime_gate(tmp_path):
-    value = plan(tmp_path)
-    value["payload"]["sealed_final_payload"] = {
-        "unseen_prompts": [{"id": "u1"}, {"id": "u2"}, {"id": "u3"}],
-        "long_outputs": [{"id": "l1", "output_tokens": 1024}],
-        "paired_speedups": [1.2, 1.25, 1.3],
-        "token_forcing_rows": [{"teacher_forced": True, "token_match": False}],
-    }
-    runner = ScriptedRunner()
-    controller = rsi_autotune.AutotuneController(value, runner, tmp_path / "state")
-    result = controller.run_once()
-    assert result["best"]["candidate_id"] == "baseline-control"
-    candidate = next(iter(result["results"].values()))
-    assert candidate["gates"]["sealed_final"] is False
-
-
-def test_strict_evidence_rejects_asserted_runtime_passes(tmp_path):
-    value = plan(tmp_path)
-    value["payload"]["strict_evidence"] = True
-    runner = ScriptedRunner()
-    controller = rsi_autotune.AutotuneController(value, runner, tmp_path / "state")
-    result = controller.run_once()
-    assert result["best"]["candidate_id"] == "baseline-control"
-    candidate = next(iter(result["results"].values()))
-    assert candidate["gates"]["teacher_forced"] is False
-    assert candidate["gates"]["paired_evidence"] is False

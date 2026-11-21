@@ -25,7 +25,7 @@ def base_plan():
         "operations": ["doctor", "profile", "accuracy", "performance"],
         "parallel_workers": 2,
         "devices": ["0", "1"],
-        "payload": {"sealed_final": True},
+        "payload": {},
     }
 
 
@@ -39,7 +39,6 @@ def test_validate_normalizes_defaults_and_render_requires_lease():
     assert rendered_payload["startup_script"] == "/home/user/model/start.sh"
     assert rendered_payload["test_script"] == "/home/user/model/benchmark.sh"
     assert rendered["steps"][2]["requires"] == ["coordinator.lease"]
-    assert rendered["gates"]["sealed_final"] is True
     assert rendered_payload["defaults"]["profile_binding"]["tool"] == "msprof"
     assert rendered_payload["defaults"]["optimization_scope"]["parameters"]["num_speculative_tokens"] == "adaptive"
     assert rendered_payload["defaults"]["optimization_scope"]["strategy"] == "trend_bound"
@@ -47,16 +46,6 @@ def test_validate_normalizes_defaults_and_render_requires_lease():
         "runtime_parameters", "startup_features"
     ]
     assert rendered_payload["algorithm_exploration_authorized"] is False
-
-
-def test_source_implementation_requires_algorithm_exploration_authorization():
-    plan = base_plan()
-    plan["operations"] = ["prepare", "implement", "build"]
-    normalized = rsi_plan.validate(plan)
-    assert "implement" not in normalized["operations"]
-    plan["payload"]["allow_unimplemented_algorithms"] = True
-    normalized = rsi_plan.validate(plan)
-    assert normalized["operations"][:2] == ["prepare", "implement"]
 
 
 @pytest.mark.parametrize("field", ["source_root", "rsi_root"])
