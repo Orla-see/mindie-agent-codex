@@ -47,6 +47,44 @@ def test_reference_adapter_missing_evidence_fails_closed(tmp_path):
     assert result["reason"] == "accuracy_command_not_configured"
 
 
+def test_simulation_adapter_normalizes_analytical_metrics(tmp_path):
+    command = tmp_path / "simulator.py"
+    command.write_text(
+        "import json\n"
+        "print(json.dumps({'status':'completed','throughput':120,'ttft_ms':8,'oom':False}))\n",
+        encoding="utf-8",
+    )
+    result = rsi_runtime_adapter.dispatch(
+        "simulation", tmp_path,
+        {"objective": "maximize throughput",
+         "runtime_binding": {"commands": {"simulation_cmd": [sys.executable, str(command)]}}},
+    )
+    assert result["evidence_kind"] == "analytical"
+    assert result["eligible_for_measurement"] is True
+    assert result["simulation_score"] == 120
+
+
+def test_simulation_adapter_reads_standard_output_artifacts(tmp_path):
+    output = tmp_path / "sim-output"
+    output.mkdir()
+    (output / "predict_dict.json").write_text(
+        json.dumps({"decode": {"throughput_tokens_s": 88}}), encoding="utf-8"
+    )
+    (output / "memory_dict.json").write_text(
+        json.dumps({"rank_0": {"oom": True}}), encoding="utf-8"
+    )
+    command = tmp_path / "silent_simulator.py"
+    command.write_text("print('simulation complete')\n", encoding="utf-8")
+    result = rsi_runtime_adapter.dispatch(
+        "simulation", tmp_path,
+        {"objective": "maximize throughput", "simulation_output_dir": str(output),
+         "runtime_binding": {"commands": {"simulation_cmd": [sys.executable, str(command)]}}},
+    )
+    assert result["metrics"]["throughput_tokens_s"] == 88
+    assert result["oom"] is True
+    assert result["eligible_for_measurement"] is False
+
+
 def test_implementation_provider_uses_configured_claude_command(tmp_path):
     command = tmp_path / "claude_stub.py"
     command.write_text(

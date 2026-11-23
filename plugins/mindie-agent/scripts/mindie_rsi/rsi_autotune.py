@@ -34,6 +34,7 @@ try:
     from rsi_compare import compare as compare_objective
     from rsi_sealed_final import evaluate as evaluate_sealed_final
     from rsi_evidence import validate_paired, validate_profile, validate_teacher_forcing
+    from rsi_simulation import rank as rank_simulations
 except ImportError:  # pragma: no cover - direct package execution fallback
     from .rsi_plan import SCHEMA, PlanError, validate
     from .rsi_install import install as install_rsi_entry
@@ -46,6 +47,7 @@ except ImportError:  # pragma: no cover - direct package execution fallback
     from .rsi_compare import compare as compare_objective
     from .rsi_sealed_final import evaluate as evaluate_sealed_final
     from .rsi_evidence import validate_paired, validate_profile, validate_teacher_forcing
+    from .rsi_simulation import rank as rank_simulations
 
 
 STATE_SCHEMA = "mindie-agent/rsi-autotune-state/v1"
@@ -343,6 +345,8 @@ class AutotuneController:
                 "test_description": self.plan.get("test_description"),
                 "test_command": self.plan.get("test_command"),
                 "bindings": self.plan.get("bindings"), "candidate": dict(item),
+                "simulation": item.get("simulation"),
+                "simulation_score": item.get("simulation_score"),
                 "current_best": dict(state.get("best") or {}),
                 "cost_model": state.get("cost_model"),
                 "workload_manifest": state.get("workload_manifest"),
@@ -360,6 +364,8 @@ class AutotuneController:
         # adapters that do not inspect the nested controls object.
         for key in ("deployment", "implementation_provider", "implementation_providers", "implementation_cmd", "implement_cmd", "build_cmd", "profile_cmd", "token_forcing_cmd",
                     "benchmark_cmd", "teacher_forcing_scorer_cmd", "profile_paths", "msprof_paths",
+                    "simulation_cmd", "simulator_cmd", "simulation_top_k", "simulation_max_candidates",
+                    "simulation_output_dir", "simulation_output_path",
                     "token_forcing_rows", "candidate_token_ids", "stock_token_ids", "margin_delta",
                     "workload_manifest", "warmup_runs", "repeats", "dataset", "dataset_revision",
                     "prompt_ids", "batch_size", "concurrency", "max_new_tokens", "temperature", "top_p",
@@ -368,19 +374,24 @@ class AutotuneController:
                 payload[key] = controls[key]
         return payload
 
-    def _operations(self) -> list[str]:
+    def _operations(self, *, simulation_only: bool = False) -> list[str]:
+        if simulation_only:
+            return ["simulation"] if "simulation" in self.plan["operations"] else []
         ordered = ("prepare", "implement", "build", "profile", "accuracy", "performance")
         return [operation for operation in ordered if operation in self.plan["operations"]]
 
-    def _evaluate(self, item: Mapping[str, Any], state: Mapping[str, Any]) -> dict[str, Any]:
+    def _evaluate(self, item: Mapping[str, Any], state: Mapping[str, Any], *,
+                  simulation_only: bool = False) -> dict[str, Any]:
         precheck = item.get("theoretical_precheck")
         if isinstance(precheck, Mapping) and precheck.get("eligible_for_measurement") is False:
             return {"status": "failed", "reason": "theoretical_precheck_failed",
                     "theoretical_precheck": dict(precheck), "candidate_id": item.get("candidate_id")}
         payload = self._payload(item, state)
         receipts: dict[str, Mapping[str, Any]] = {}
+        if isinstance(item.get("simulation"), Mapping):
+            receipts["simulation"] = dict(item["simulation"])
         try:
-            for operation in self._operations():
+            for operation in self._operations(simulation_only=simulation_only):
                 receipt = self.runner.run(operation, payload)
                 receipts[operation] = dict(receipt.value)
                 if operation == "prepare" and isinstance(receipt.value.get("workload_snapshot"), Mapping):
@@ -398,6 +409,15 @@ class AutotuneController:
                     self._cleanup(payload, receipts)
                     return {"status": "failed", "reason": f"{operation}_failed",
                             "receipts": receipts}
+            if simulation_only:
+                simulation = receipts.get("simulation", {})
+                return {
+                    "status": "simulation_passed" if simulation.get("eligible_for_measurement") else "simulation_rejected",
+                    "candidate_id": item["candidate_id"],
+                    "simulation": simulation,
+                    "simulation_score": simulation.get("simulation_score"),
+                    "eligible_for_measurement": simulation.get("eligible_for_measurement") is True,
+                }
         except UnknownExternalEffect as exc:
             return {"status": "unknown", "reason": str(exc), "receipts": receipts,
                     "requires_reconcile": True}
@@ -508,7 +528,9 @@ class AutotuneController:
         selected: list[dict[str, Any]] = []
         occupied: set[tuple[str, str]] = set()
         for raw in queue.get("candidates", []):
-            if not isinstance(raw, Mapping) or raw.get("status") not in {"pending", "bound"}:
+            if not isinstance(raw, Mapping) or raw.get("status") not in {
+                "pending", "bound", "measurement_pending"
+            }:
                 continue
             cid = str(raw.get("candidate_id"))
             if cid in evaluated:
@@ -522,30 +544,113 @@ class AutotuneController:
                 break
         return selected
 
+    def _run_candidate_wave(self, wave: Sequence[Mapping[str, Any]],
+                            state: Mapping[str, Any], *, simulation_only: bool = False
+                            ) -> dict[str, dict[str, Any]]:
+        results: dict[str, dict[str, Any]] = {}
+        if not wave:
+            return results
+        if len(wave) == 1:
+            item = wave[0]
+            results[item["candidate_id"]] = self._evaluate(
+                item, state, simulation_only=simulation_only
+            )
+            return results
+        with ThreadPoolExecutor(max_workers=min(self.workers, len(wave))) as pool:
+            futures = {
+                pool.submit(self._evaluate, item, state,
+                            simulation_only=simulation_only): item
+                for item in wave
+            }
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    results[item["candidate_id"]] = future.result()
+                except Exception as exc:
+                    results[item["candidate_id"]] = {
+                        "status": "failed", "reason": f"{type(exc).__name__}: {exc}"
+                    }
+        return results
+
+    def _run_simulation_round(self, state: dict[str, Any], queue: dict[str, Any]) -> dict[str, Any]:
+        pending = [
+            dict(item) for item in queue.get("candidates", [])
+            if isinstance(item, Mapping) and item.get("status") in {"pending", "bound"}
+            and str(item.get("candidate_id")) not in (state.get("evaluated") or {})
+        ]
+        if not pending:
+            state["simulation_complete"] = True
+            _write(self.state_path, state)
+            return {"status": "simulation_idle", "selected_for_measurement": []}
+        maximum = int(self.plan["payload"].get("simulation_max_candidates", len(pending)))
+        if maximum < 1:
+            raise AutotuneError("simulation_max_candidates must be positive")
+        wave = pending[:maximum]
+        simulation_results = self._run_candidate_wave(wave, state, simulation_only=True)
+        failures = {
+            cid: result for cid, result in simulation_results.items()
+            if result.get("status") == "failed"
+        }
+        if failures:
+            state["status"] = "idle"
+            _write(self.state_path, state)
+            return {"status": "simulation_failed", "failures": failures}
+        top_k = int(self.plan["payload"].get(
+            "simulation_top_k", max(1, min(self.workers, len(wave)))
+        ))
+        selected = set(rank_simulations({
+            cid: result.get("simulation", {}) for cid, result in simulation_results.items()
+        }, top_k))
+        for item in queue.get("candidates", []):
+            if not isinstance(item, dict):
+                continue
+            cid = str(item.get("candidate_id"))
+            result = simulation_results.get(cid)
+            if result is None:
+                continue
+            item["simulation"] = result.get("simulation", {})
+            item["simulation_score"] = result.get("simulation_score")
+            if cid in selected:
+                item["status"] = "measurement_pending"
+            else:
+                item["status"] = (
+                    "simulation_rejected" if not result.get("eligible_for_measurement")
+                    else "simulation_filtered"
+                )
+                state.setdefault("evaluated", {})[cid] = {
+                    "status": item["status"], "round": int(state.get("round", 0)),
+                    "speedup": 0.0,
+                }
+        state["simulation_complete"] = len(wave) == len(pending)
+        state["status"] = "idle"
+        state["active_candidate"] = None
+        queue["updated_unix"] = time.time()
+        queue["counts"] = {}
+        for item in queue.get("candidates", []):
+            status = str(item.get("status", "pending"))
+            queue["counts"][status] = queue["counts"].get(status, 0) + 1
+        _write(self.queue_path, queue)
+        _write(self.state_path, state)
+        return {
+            "status": "simulation_completed",
+            "simulation": simulation_results,
+            "selected_for_measurement": sorted(selected),
+            "top_k": top_k,
+        }
+
     def run_once(self) -> dict[str, Any]:
         state = self._load_state()
         self._prepare_metadata(state)
         queue = self._load_queue(state)
+        if "simulation" in self.plan["operations"] and not state.get("simulation_complete"):
+            return self._run_simulation_round(state, queue)
         wave = self._select_wave(queue, state)
         if not wave:
             return {"status": "idle", "reason": "no_pending_candidates", "best": state.get("best")}
         state["status"] = "running"
         state["round"] = int(state.get("round", 0)) + 1
         _write(self.state_path, state)
-        results: dict[str, dict[str, Any]] = {}
-        if len(wave) == 1:
-            item = wave[0]
-            results[item["candidate_id"]] = self._evaluate(item, state)
-        else:
-            with ThreadPoolExecutor(max_workers=len(wave)) as pool:
-                futures = {pool.submit(self._evaluate, item, state): item for item in wave}
-                for future in as_completed(futures):
-                    item = futures[future]
-                    try:
-                        results[item["candidate_id"]] = future.result()
-                    except Exception as exc:
-                        results[item["candidate_id"]] = {
-                            "status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+        results = self._run_candidate_wave(wave, state)
 
         best = dict(state.get("best") or {"candidate_id": "baseline-control", "speedup": 1.0})
         for item in wave:

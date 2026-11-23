@@ -81,6 +81,56 @@ def test_successful_candidate_is_promoted_only_after_all_gates(tmp_path):
     assert runner.calls == ["prepare", "build", "accuracy", "performance"]
 
 
+def test_simulation_selects_top_k_before_real_measurement(tmp_path):
+    value = plan(tmp_path, candidates=[
+        {"candidate_id": "slow", "method": "config", "config": {"k": 1}},
+        {"candidate_id": "fast", "method": "config", "config": {"k": 2}},
+    ])
+    value["operations"] = ["simulation", "prepare", "build", "accuracy", "performance", "cleanup"]
+    value["payload"]["simulation_top_k"] = 1
+
+    class SimulatorRunner(ScriptedRunner):
+        def run(self, operation, payload):
+            if operation == "simulation":
+                self.calls.append(operation)
+                candidate = payload["candidate"]["candidate_id"]
+                return rsi_autotune.ActionReceipt(operation, {
+                    "status": "completed", "passed": True,
+                    "eligible_for_measurement": True,
+                    "simulation_score": 20 if candidate == "fast" else 10,
+                })
+            return super().run(operation, payload)
+
+    runner = SimulatorRunner()
+    controller = rsi_autotune.AutotuneController(
+        value, runner, tmp_path / "state", workers=2,
+        required_gates=rsi_autotune.DEFAULT_REQUIRED_GATES,
+    )
+    first = controller.run_once()
+    assert first["selected_for_measurement"] == ["fast"]
+    second = controller.run_once()
+    assert second["best"]["candidate_id"] == "fast"
+
+
+def test_simulation_failure_keeps_candidates_pending(tmp_path):
+    value = plan(tmp_path)
+    value["operations"] = ["simulation", "performance"]
+
+    class FailedSimulator:
+        def run(self, operation, payload):
+            return rsi_autotune.ActionReceipt(operation, {
+                "status": "failed", "passed": False, "reason": "simulator_unavailable"
+            })
+
+    controller = rsi_autotune.AutotuneController(
+        value, FailedSimulator(), tmp_path / "state", workers=1, required_gates=()
+    )
+    result = controller.run_once()
+    assert result["status"] == "simulation_failed"
+    queue = json.loads((tmp_path / "state" / "autotune-queue.json").read_text())
+    assert queue["candidates"][0]["status"] == "pending"
+
+
 def test_failed_candidate_is_cleaned_and_does_not_replace_baseline(tmp_path):
     runner = ScriptedRunner(fail=True)
     controller = rsi_autotune.AutotuneController(plan(tmp_path), runner, tmp_path / "state")

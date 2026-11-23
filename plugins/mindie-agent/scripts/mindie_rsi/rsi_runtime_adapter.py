@@ -30,6 +30,7 @@ COMMAND_KEYS = {
     "build": ("build_cmd",),
     "profile": ("profile_cmd", "profiler_cmd"),
     "accuracy": ("teacher_forcing_scorer_cmd", "token_forcing_cmd", "accuracy_cmd"),
+    "simulation": ("simulation_cmd", "simulator_cmd"),
     "performance": ("benchmark_cmd", "performance_cmd"),
     "cleanup": ("cleanup_cmd",),
 }
@@ -407,6 +408,12 @@ def dispatch(operation: str, root: Path, payload: Mapping[str, Any]) -> dict[str
                     "available_providers": ["codex", "claude"]}
     result = (_run_performance_protocol(root, payload, binding, command)
               if operation == "performance" else _run(root, operation, payload, binding, command))
+    if operation == "simulation" and result.get("status") not in {"failed", "unknown", "infra_failed"}:
+        try:
+            from .rsi_simulation import normalize
+        except ImportError:
+            from rsi_simulation import normalize
+        result = normalize(result, payload)
     if operation == "profile":
         result = _normalize_profile(result, payload)
     if operation == "implement":
