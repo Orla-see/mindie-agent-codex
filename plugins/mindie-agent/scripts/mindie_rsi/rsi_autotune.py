@@ -51,7 +51,9 @@ except ImportError:  # pragma: no cover - direct package execution fallback
 
 
 STATE_SCHEMA = "mindie-agent/rsi-autotune-state/v1"
+SIMULATION_RESULT_SCHEMA = "mindie-agent/rsi-simulation-results/v1"
 UNKNOWN_EXTERNAL = {"unknown", "running", "submitted", "pending", "inflight"}
+MEASUREMENT_OPERATIONS = {"prepare", "build", "profile", "accuracy", "performance"}
 DEFAULT_REQUIRED_GATES = (
     "benchmark_passed", "correctness_passed", "teacher_forced",
     "paper_ready", "sealed_final",
@@ -247,6 +249,7 @@ class AutotuneController:
         self.state_path = self.state_dir / "autotune-state.json"
         self.queue_path = self.state_dir / "autotune-queue.json"
         self.active_path = self.state_dir / "active-best.json"
+        self.simulation_path = self.state_dir / "simulation-results.json"
         self.cost_model_path = self.state_dir / "cost-model.json"
         self.workload_path = self.state_dir / "workload-manifest.json"
         self.memory_path = self.state_dir / "memory.jsonl"
@@ -278,10 +281,12 @@ class AutotuneController:
     def _prepare_metadata(self, state: dict[str, Any]) -> None:
         """Persist the cost-model and expose replayable memory to runners."""
         startup_text = None
-        try:
-            startup_text = Path(self.plan.get("startup_script", "")).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            pass
+        startup_script = self.plan.get("startup_script")
+        if isinstance(startup_script, str) and startup_script:
+            try:
+                startup_text = Path(startup_script).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                pass
         manifest = build_manifest({**self.plan["payload"], "objective": self.plan["objective"],
                                    "test_command": self.plan.get("test_command")},
                                   startup_text=startup_text)
@@ -332,6 +337,110 @@ class AutotuneController:
                  "candidates": candidates, "counts": {"pending": len(candidates)}}
         _write(self.queue_path, queue)
         return queue
+
+    def _simulation_only(self) -> bool:
+        operations = set(self.plan["operations"])
+        return "simulation" in operations and not operations.intersection(MEASUREMENT_OPERATIONS)
+
+    def _simulation_snapshot(self, queue: Mapping[str, Any], selected: set[str],
+                             top_k: int) -> dict[str, Any]:
+        candidates: list[dict[str, Any]] = []
+        for raw in queue.get("candidates", []):
+            if not isinstance(raw, Mapping):
+                continue
+            simulation = raw.get("simulation")
+            if not isinstance(simulation, Mapping):
+                continue
+            score = raw.get("simulation_score")
+            candidates.append({
+                "candidate_id": str(raw.get("candidate_id")),
+                "method": raw.get("method"),
+                "config": dict(raw.get("config") or {}),
+                "status": raw.get("status"),
+                "simulation_score": score,
+                "eligible_for_measurement": raw.get("status") in {
+                    "measurement_pending", "simulation_selected"
+                } or simulation.get("eligible_for_measurement") is True,
+                "simulation": dict(simulation),
+            })
+        candidates.sort(
+            key=lambda item: (
+                isinstance(item.get("simulation_score"), (int, float)),
+                float(item.get("simulation_score") or 0.0),
+                item["candidate_id"],
+            ),
+            reverse=True,
+        )
+        result = {
+            "schema": SIMULATION_RESULT_SCHEMA,
+            "task_id": self.plan["task_id"],
+            "objective": self.plan["objective"],
+            "status": "completed",
+            "evidence_kind": "analytical",
+            "candidate_count": len(candidates),
+            "eligible_count": sum(
+                1 for item in candidates if item["eligible_for_measurement"]
+            ),
+            "top_k": top_k,
+            "selected_candidate_ids": [
+                item["candidate_id"] for item in candidates
+                if item["candidate_id"] in selected
+            ],
+            "candidates": candidates,
+            "recorded_unix": time.time(),
+        }
+        return result
+
+    def _finalize_simulation(self, state: dict[str, Any], queue: dict[str, Any],
+                             top_k: int) -> tuple[dict[str, Any], list[str]]:
+        receipts = {
+            str(item.get("candidate_id")): item.get("simulation", {})
+            for item in queue.get("candidates", [])
+            if isinstance(item, Mapping) and isinstance(item.get("simulation"), Mapping)
+        }
+        selected = set(rank_simulations(receipts, top_k))
+        simulation_only = self._simulation_only()
+        for item in queue.get("candidates", []):
+            if not isinstance(item, dict) or not isinstance(item.get("simulation"), Mapping):
+                continue
+            cid = str(item.get("candidate_id"))
+            eligible = item["simulation"].get("eligible_for_measurement") is True
+            if cid in selected:
+                item["status"] = "simulation_selected" if simulation_only else "measurement_pending"
+                if simulation_only:
+                    state.setdefault("evaluated", {})[cid] = {
+                        "status": "simulation_selected",
+                        "round": int(state.get("round", 0)),
+                        "simulation_score": item.get("simulation_score"),
+                    }
+                    state.setdefault("history", []).append({
+                        "candidate_id": cid,
+                        "round": int(state.get("round", 0)),
+                        "status": "simulation_selected",
+                        "simulation_score": item.get("simulation_score"),
+                    })
+            else:
+                item["status"] = "simulation_filtered" if eligible else "simulation_rejected"
+                state.setdefault("evaluated", {})[cid] = {
+                    "status": item["status"],
+                    "round": int(state.get("round", 0)),
+                    "simulation_score": item.get("simulation_score"),
+                }
+        snapshot = self._simulation_snapshot(queue, selected, top_k)
+        _write(self.simulation_path, snapshot)
+        state["simulation_complete"] = True
+        state["simulation_result_path"] = str(self.simulation_path)
+        state["simulation_selected"] = sorted(selected)
+        state["status"] = "idle"
+        state["active_candidate"] = None
+        queue["updated_unix"] = time.time()
+        queue["counts"] = {}
+        for item in queue.get("candidates", []):
+            status = str(item.get("status", "pending"))
+            queue["counts"][status] = queue["counts"].get(status, 0) + 1
+        _write(self.queue_path, queue)
+        _write(self.state_path, state)
+        return snapshot, sorted(selected)
 
     def _payload(self, item: Mapping[str, Any], state: Mapping[str, Any]) -> dict[str, Any]:
         controls = dict(self.plan["payload"])
@@ -573,6 +682,7 @@ class AutotuneController:
         return results
 
     def _run_simulation_round(self, state: dict[str, Any], queue: dict[str, Any]) -> dict[str, Any]:
+        """Evaluate a bounded wave and persist a global analytical ranking."""
         pending = [
             dict(item) for item in queue.get("candidates", [])
             if isinstance(item, Mapping) and item.get("status") in {"pending", "bound"}
@@ -596,11 +706,11 @@ class AutotuneController:
             _write(self.state_path, state)
             return {"status": "simulation_failed", "failures": failures}
         top_k = int(self.plan["payload"].get(
-            "simulation_top_k", max(1, min(self.workers, len(wave)))
+            "simulation_top_k",
+            max(1, min(self.workers, len(queue.get("candidates", [])))),
         ))
-        selected = set(rank_simulations({
-            cid: result.get("simulation", {}) for cid, result in simulation_results.items()
-        }, top_k))
+        if top_k < 1:
+            raise AutotuneError("simulation_top_k must be positive")
         for item in queue.get("candidates", []):
             if not isinstance(item, dict):
                 continue
@@ -610,18 +720,25 @@ class AutotuneController:
                 continue
             item["simulation"] = result.get("simulation", {})
             item["simulation_score"] = result.get("simulation_score")
-            if cid in selected:
-                item["status"] = "measurement_pending"
-            else:
-                item["status"] = (
-                    "simulation_rejected" if not result.get("eligible_for_measurement")
-                    else "simulation_filtered"
-                )
-                state.setdefault("evaluated", {})[cid] = {
-                    "status": item["status"], "round": int(state.get("round", 0)),
-                    "speedup": 0.0,
-                }
-        state["simulation_complete"] = len(wave) == len(pending)
+            item["status"] = "simulation_ready"
+        complete = len(wave) == len(pending)
+        if complete:
+            snapshot, selected = self._finalize_simulation(state, queue, top_k)
+            simulation = {
+                str(item["candidate_id"]): item.get("simulation", {})
+                for item in queue.get("candidates", [])
+                if isinstance(item, Mapping) and isinstance(item.get("simulation"), Mapping)
+            }
+            return {
+                "status": "simulation_completed",
+                "simulation_only": self._simulation_only(),
+                "simulation": simulation,
+                "selected_for_measurement": [] if self._simulation_only() else selected,
+                "selected_candidates": selected,
+                "ranking": snapshot["candidates"],
+                "top_k": top_k,
+                "result_path": str(self.simulation_path),
+            }
         state["status"] = "idle"
         state["active_candidate"] = None
         queue["updated_unix"] = time.time()
@@ -632,9 +749,11 @@ class AutotuneController:
         _write(self.queue_path, queue)
         _write(self.state_path, state)
         return {
-            "status": "simulation_completed",
+            "status": "simulation_progress",
             "simulation": simulation_results,
-            "selected_for_measurement": sorted(selected),
+            "selected_for_measurement": [],
+            "simulated_candidate_ids": sorted(simulation_results),
+            "remaining_candidates": len(pending) - len(wave),
             "top_k": top_k,
         }
 
@@ -844,7 +963,8 @@ def main(argv: list[str] | None = None) -> int:
                 break
             if round_limit is not None and rounds >= round_limit:
                 break
-            if result.get("status") in {"idle", "needs_reconcile"}:
+            if (result.get("status") in {"idle", "needs_reconcile"}
+                    or result.get("simulation_only") is True):
                 break
             best = result.get("best")
             reached = (target is not None and isinstance(best, Mapping)

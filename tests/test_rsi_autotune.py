@@ -131,6 +131,87 @@ def test_simulation_failure_keeps_candidates_pending(tmp_path):
     assert queue["candidates"][0]["status"] == "pending"
 
 
+def test_simulation_only_persists_global_ranking_without_measurement(tmp_path):
+    candidate_plan = plan(tmp_path)
+    candidate_plan["startup_script"] = None
+    candidate_plan["test_script"] = None
+    candidate_plan["operations"] = ["simulation"]
+    candidate_plan["parallel_workers"] = 2
+    candidate_plan["payload"] = {
+        "candidate_method": "tree",
+        "candidate_space": {"k": [1, 2, 3, 4]},
+        "simulation_max_candidates": 2,
+        "simulation_top_k": 2,
+    }
+
+    class SimulationOnlyRunner:
+        def __init__(self):
+            self.calls = []
+
+        def run(self, operation, payload):
+            self.calls.append(operation)
+            candidate = payload["candidate"]
+            score = candidate["config"]["k"]
+            return rsi_autotune.ActionReceipt(operation, {
+                "status": "completed", "passed": True,
+                "evidence_kind": "analytical", "eligible_for_measurement": True,
+                "simulation_score": score,
+                "metrics": {"throughput_tokens_s": score},
+            })
+
+    runner = SimulationOnlyRunner()
+    controller = rsi_autotune.AutotuneController(
+        candidate_plan, runner, tmp_path / "state", workers=2, required_gates=(),
+    )
+    first = controller.run_once()
+    second = controller.run_once()
+
+    assert first["status"] == "simulation_progress"
+    assert second["status"] == "simulation_completed"
+    assert second["simulation_only"] is True
+    assert second["selected_for_measurement"] == []
+    assert len(second["ranking"]) == 4
+    assert len(runner.calls) == 4
+    result_path = tmp_path / "state" / "simulation-results.json"
+    persisted = json.loads(result_path.read_text())
+    assert persisted["schema"] == "mindie-agent/rsi-simulation-results/v1"
+    assert persisted["selected_candidate_ids"] == [
+        rsi_autotune.candidate_id("tree", {"k": 4}),
+        rsi_autotune.candidate_id("tree", {"k": 3}),
+    ]
+    state = json.loads((tmp_path / "state" / "autotune-state.json").read_text())
+    assert state["simulation_result_path"] == str(result_path)
+    assert not (tmp_path / "state" / "active-best.json").exists()
+
+
+def test_cli_stops_after_simulation_only_completion(tmp_path, monkeypatch, capsys):
+    candidate_plan = plan(tmp_path)
+    candidate_plan["startup_script"] = None
+    candidate_plan["test_script"] = None
+    candidate_plan["operations"] = ["simulation"]
+    candidate_plan["payload"] = {"candidate_space": {"k": [1, 2]}}
+    path = tmp_path / "simulation-plan.json"
+    path.write_text(json.dumps(candidate_plan), encoding="utf-8")
+
+    class FakeController:
+        calls = 0
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run_once(self):
+            type(self).calls += 1
+            return {"status": "simulation_completed", "simulation_only": True,
+                    "selected_candidates": ["candidate-1"]}
+
+    monkeypatch.setattr(rsi_autotune, "AutotuneController", FakeController)
+    assert rsi_autotune.main([
+        str(path), "--dry-run", "--state-dir", str(tmp_path / "state"),
+    ]) == 0
+    assert FakeController.calls == 1
+    assert json.loads(capsys.readouterr().out)["simulation_only"] is True
+
+
 def test_failed_candidate_is_cleaned_and_does_not_replace_baseline(tmp_path):
     runner = ScriptedRunner(fail=True)
     controller = rsi_autotune.AutotuneController(plan(tmp_path), runner, tmp_path / "state")

@@ -101,18 +101,27 @@ def validate(plan: Any) -> dict[str, Any]:
     source_root = _remote_path(plan.get("source_root"), "source_root")
     rsi_root = _remote_path(plan.get("rsi_root"), "rsi_root")
     missing = []
-    if plan.get("startup_script") is None:
+    operations = plan.get("operations")
+    simulation_only = (
+        isinstance(operations, list)
+        and "simulation" in operations
+        and not any(operation in {"prepare", "build", "profile", "accuracy", "performance"}
+                    for operation in operations)
+    )
+    if plan.get("startup_script") is None and not simulation_only:
         missing.append("startup_script")
     test_script_value = plan.get("test_script")
     test_config_value = plan.get("test_config")
     test_description_value = plan.get("test_description")
     test_command_value = plan.get("test_command")
-    if all(value is None for value in (test_script_value, test_config_value,
-                                       test_description_value, test_command_value)):
+    if (all(value is None for value in (test_script_value, test_config_value,
+                                        test_description_value, test_command_value))
+            and not simulation_only):
         missing.append("test_script or test_config or test_description or test_command")
     if missing:
         raise MissingInputError(missing)
-    startup_script = _remote_path(plan.get("startup_script"), "startup_script")
+    startup_script = (_remote_path(plan.get("startup_script"), "startup_script")
+                      if plan.get("startup_script") is not None else None)
     test_script = (_remote_path(test_script_value, "test_script")
                    if test_script_value is not None else None)
     test_config = (_remote_path(test_config_value, "test_config")
